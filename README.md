@@ -1,4 +1,4 @@
-# Coding Agent Starter v0.1 — 实习求职保底项目
+# Coding Agent Starter v0.1
 
 **目标：** 从最小的 Repo Coding Agent 开始，围绕真实 GitHub Issue 建立“观察代码 → 决策 → 修改 → 测试 → 反馈”的可重复实验闭环。
 
