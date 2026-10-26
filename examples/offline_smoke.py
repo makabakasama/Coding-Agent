@@ -1,4 +1,4 @@
-"""No API key required. Verify read → patch → pytest → finish end-to-end."""
+"""No API key required. Verify read → replace_lines → pytest → finish end-to-end."""
 import json
 from pathlib import Path
 import subprocess
@@ -6,6 +6,7 @@ import sys
 import tempfile
 
 from repo_agent.agent import Agent
+from repo_agent.decisions import Decision
 from repo_agent.tools import RepoTools
 
 
@@ -13,15 +14,19 @@ class ScriptedModel:
     def __init__(self):
         self.steps = iter([
             {"action": "read_file", "args": {"path": "calc.py", "start": 1, "end": 20}},
-            {"action": "apply_patch", "args": {"patch":
-                "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a - b\n+    return a + b\n"}},
+            {"action": "replace_lines", "args": {
+                "start": 2, "end": 2, "new_text": "    return a + b\n"}},
             {"action": "run_tests", "args": {"target": "test_calc.py"}},
             {"action": "finish", "args": {"answer":
                 "Changed subtraction to addition. Verified by test_calc.py."}},
         ])
 
     def decide(self, messages):
-        return json.dumps(next(self.steps))
+        decision = next(self.steps)
+        if decision["action"] == "replace_lines":
+            observation = json.loads(messages[-1]["content"])
+            decision["args"]["snapshot_id"] = observation["data"]["snapshot_id"]
+        return Decision(**decision)
 
 
 def main():

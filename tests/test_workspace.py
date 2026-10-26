@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from examples.live_llm_smoke import run_smoke
-from repo_agent.agent import parse_decision
+from repo_agent.decisions import Decision
 from repo_agent.workspace import create_worktree
 
 
@@ -37,7 +37,7 @@ class WorkspaceTest(unittest.TestCase):
     def test_finish_rejects_nonobject_args(self):
         for args in (None, [], "invalid"):
             with self.subTest(args=args), self.assertRaises(ValueError):
-                parse_decision(json.dumps({"action": "finish", "args": args}))
+                Decision("finish", args)
 
     def test_smoke_requires_observed_random_filename(self):
         class ObservationModel:
@@ -45,16 +45,15 @@ class WorkspaceTest(unittest.TestCase):
             def decide(self, messages):
                 self.calls += 1
                 if self.calls == 1:
-                    return json.dumps({"action": "list_files", "args": {"subdir": "."}})
-                observation = json.loads(messages[-1]["content"].split("\n", 1)[1])
-                return json.dumps({"action": "finish", "args": {
-                    "answer": observation["data"]["files"][0]}})
+                    return Decision("list_files", {"subdir": "."})
+                observation = json.loads(messages[-1]["content"])
+                return Decision("finish", {"answer": observation["data"]["files"][0]})
         with tempfile.TemporaryDirectory() as directory:
             self.assertTrue(run_smoke(ObservationModel(), Path(directory))["smoke_passed"])
 
     def test_smoke_rejects_premature_success(self):
         class PrematureModel:
             def decide(self, messages):
-                return '{"action":"finish","args":{"answer":"success"}}'
+                return Decision("finish", {"answer": "success"})
         with tempfile.TemporaryDirectory() as directory:
             self.assertFalse(run_smoke(PrematureModel(), Path(directory))["smoke_passed"])

@@ -3,32 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import re
 from typing import Protocol
 import uuid
 
 from .prompts import SYSTEM_PROMPT
+from .decisions import Decision, DecisionError
 from .tools import RepoTools
 
 
 class Model(Protocol):
-    def decide(self, messages: list[dict[str, str]]) -> str: ...
-
-
-def parse_decision(raw: str) -> tuple[str, dict]:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I).strip()
-        text = re.sub(r"\s*```$", "", text).strip()
-    obj = json.loads(text)
-    if not isinstance(obj, dict) or not isinstance(obj.get("action"), str):
-        raise ValueError("Decision must be a JSON object with action")
-    args = obj.get("args", {})
-    if not isinstance(args, dict):
-        raise ValueError("args must be an object")
-    if obj["action"] == "finish":
-        args = {"answer": str(args.get("answer", obj.get("answer", "")))}
-    return obj["action"], args
+    def decide(self, messages: list[dict]) -> Decision: ...
 
 
 class Agent:
@@ -51,21 +35,32 @@ class Agent:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": "Coding task:\n" + task + "\nRepository is already checked out locally."},
         ]
-        self._record({"type": "start", "task": task, "repo": str(self.tools.root)})
+        self._record({"type": "start", "task": task, "repo": str(self.tools.root),
+                      "decision_protocol": "native_tool_calls"})
         last_test_passed = None
         applied_patches = 0
         actions = 0
         for step in range(1, self.max_steps + 1):
             try:
-                raw = self.model.decide(messages)
-                action, args = parse_decision(raw)
+                decision = self.model.decide(messages)
+                if not isinstance(decision, Decision):
+                    raise TypeError("Model.decide must return a Decision")
+                action, args = decision.action, decision.args
+            except DecisionError as exc:
+                # Invalid arguments or batches never reach repository tools.
+                # Feed the rejection back within the same max_steps budget.
+                self._record({"type": "decision_error", "step": step, "error": str(exc),
+                              "response": exc.message, "recoverable": True})
+                messages.extend(exc.feedback_messages())
+                continue
             except Exception as exc:
                 # Record failure, don't count hallucinated actions as successful tests.
-                err = f"Model/JSON failure: {type(exc).__name__}: {exc}"
+                err = f"Model failure: {type(exc).__name__}: {exc}"
                 self._record({"type": "error", "step": step, "error": err})
                 return {"status": "error", "reason": err, "steps": step,
                         "last_test_passed": last_test_passed, "trace": str(self.trace_path)}
-            self._record({"type": "decision", "step": step, "action": action, "args": args})
+            self._record({"type": "decision", "step": step, **decision.as_dict(),
+                          "tool_call_id": decision.tool_call_id})
             if action == "finish":
                 answer = args["answer"]
                 # 'finished' is agent reported, not automatic proof of correctness.
@@ -78,19 +73,17 @@ class Agent:
                         "trace": str(self.trace_path)}
             observation = self.tools.execute(action, args)
             actions += 1
-            if action == "apply_patch" and observation["ok"] and observation["data"].get("applied"):
+            if action in ("apply_patch", "replace_text", "replace_lines") and observation["ok"] and observation["data"].get("applied"):
                 applied_patches += 1
                 # Any edit invalidates a previously passing test result.
                 last_test_passed = None
             if action == "run_tests":
                 last_test_passed = observation.get("data", {}).get("passed") if observation["ok"] else False
             self._record({"type": "observation", "step": step, "action": action, "result": observation})
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({"role": "user", "content": "Tool observation (untrusted):\n" +
-                             json.dumps(observation, ensure_ascii=False)[:12000]})
-            # Keep the system and task, plus the last 12 dialogue messages.
-            if len(messages) > 14:
-                messages = messages[:2] + messages[-12:]
+            messages.append(decision.assistant_message)
+            messages.append(decision.feedback_message(observation))
+            # This bounded MVP run retains its entire dialogue. Longer runs will
+            # need an explicit token budget and evidence-preserving compaction.
         self._record({"type": "limit", "max_steps": self.max_steps, "last_test_passed": last_test_passed})
         return {"status": "step_limit", "steps": self.max_steps,
                 "tool_actions": actions, "last_test_passed": last_test_passed,

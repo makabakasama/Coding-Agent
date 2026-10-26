@@ -7,7 +7,8 @@ from pathlib import Path
 import subprocess
 
 
-def create_worktree(source: Path, destination: Path, revision: str) -> dict:
+def create_worktree(source: Path, destination: Path, revision: str, *,
+                    git_config: dict[str, str] | None = None) -> dict:
     source = source.resolve(strict=True)
     destination = destination.resolve()
     if destination.exists():
@@ -16,7 +17,9 @@ def create_worktree(source: Path, destination: Path, revision: str) -> dict:
         raise ValueError("A commit or revision is required")
 
     def git(*args):
-        return subprocess.run(["git", "-C", str(source), *args], check=True,
+        options = [item for key, value in (git_config or {}).items()
+                   for item in ("-c", f"{key}={value}")]
+        return subprocess.run(["git", *options, "-C", str(source), *args], check=True,
                               capture_output=True, text=True, encoding="utf-8",
                               timeout=120).stdout.strip()
 

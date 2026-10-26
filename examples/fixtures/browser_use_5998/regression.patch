@@ -1,0 +1,28 @@
+diff --git a/tests/ci/infrastructure/test_registry_core.py b/tests/ci/infrastructure/test_registry_core.py
+index 36e1fabe..77981e5e 100644
+--- a/tests/ci/infrastructure/test_registry_core.py
++++ b/tests/ci/infrastructure/test_registry_core.py
+@@ -129,6 +129,23 @@ class TestActionRegistryParameterPatterns:
+ 		assert result.extracted_content is not None
+ 		assert 'Text: hello, Number: 42' in result.extracted_content
+ 
++	async def test_keyword_only_parameters_no_browser(self, registry):
++		"""issue:5998 Preserve keyword-only parameters when executing an action."""
++
++		@registry.action('Action with a keyword-only parameter')
++		async def keyword_only_action(text: str, *, number: int = 10):
++			return ActionResult(
++                extracted_content=f'Text: {text}, Number: {number}'
++            )
++		
++		result = await registry.execute_action(
++            'keyword_only_action', {'text': 'hello', 'number': 42}
++        )
++
++		assert isinstance(result, ActionResult)
++		assert result.extracted_content is not None
++		assert result.extracted_content == 'Text: hello, Number: 42'
++
+ 	async def test_individual_parameters_with_browser(self, registry, browser_session, base_url):
+ 		"""Test action with individual parameters plus browser_session injection"""
+ 

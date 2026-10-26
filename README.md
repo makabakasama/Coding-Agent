@@ -11,7 +11,8 @@
 ## 目前具备的功能
 
 - [x] 读取仓库文件列表、关键词检索、按行读取文件
-- [x] 统一 JSON 决策协议（list_files/search_code/read_file/apply_patch/run_tests/finish）
+- [x] 原生工具调用决策（list_files/search_code/read_file/replace_lines/run_tests/finish），由程序声明参数结构、包装内部决策与反馈
+- [x] 快照行编辑：程序保存读取时的原始字节和 SHA256，编辑前核对整文件版本，再生成并应用 diff
 - [x] 使用 `git apply --check` 验证与应用 unified diff
 - [x] 使用 `python -m pytest` 执行定向测试（固定测试命令，禁止任意 Shell Tool）
 - [x] OpenAI-compatible Chat Completions API 适配层（可以连接兼容服务）
@@ -21,6 +22,10 @@
 - [ ] 真实模型 + 真实 GitHub Issue 端到端验证
 - [ ] 更强的上下文压缩 / AST 或符号级代码检索
 - [ ] Docker 隔离执行、可复现评测矩阵、断点恢复
+
+模型编辑已有文件时使用 `read_file` 返回的 `snapshot_id`，通过 `replace_lines`
+指定已展示的行范围和新内容。文件版本变化或成功编辑后须重新读取；原有
+`replace_text` / `apply_patch` 保留为本地兼容函数，不作为模型可调用的编辑入口。
 
 ## Windows 11 / PowerShell 运行
 
@@ -40,20 +45,23 @@ python -m examples.offline_smoke
 
 ## 连接真实模型（可选）
 
-项目根目录已提供本机 `.env`，填写其中的 `DASHSCOPE_API_KEY` 并保存后，
+项目根目录已提供本机 `.env`，分别填写 `QWEN_*` 和 `GPT_*` 两套模型、URL、密钥后，
 `scripts/live-qwen-smoke.ps1` 和 Agent CLI 会自动读取，无需每次输入。
 `.env.example` 可作为配置模板，`.env` 已排除 Git 跟踪。
 配置优先级：显式参数 > 进程环境变量 > 项目 `.env`。
+在 `.env` 中用 `LLM_PROFILE=qwen` 或 `LLM_PROFILE=gpt` 切换整套配置。
+选定 profile 后只读取对应的 `QWEN_MODEL/BASE_URL/API_KEY` 或 `GPT_MODEL/BASE_URL/API_KEY`，缺项不会借用另一套或旧配置。
+未设置 `LLM_PROFILE` 时保留旧行为：同一来源内优先读取 `LLM_*`，兼容 `OPENAI_*` 和 `DASHSCOPE_API_KEY`。
+`LLM_PROVIDER` 支持 `openai_compatible`；完整示例见 `.env.example`。
 
 在 PowerShell 中为兼容的 API 设置环境变量：
 
 ```powershell
-$env:OPENAI_BASE_URL="https://YOUR_PROVIDER.example/v1"
-$env:OPENAI_MODEL="YOUR_MODEL_ID"
-$env:OPENAI_API_KEY="YOUR_KEY"
+$env:LLM_PROVIDER="openai_compatible"
+$env:LLM_PROFILE="gpt" # 改为 qwen 即可使用另一套已保存配置
 ```
 
-本地 Ollama（OpenAI-compatible `/v1`）也可以使用对应本机地址；实际可用性取决于选定模型是否善于输出准确 JSON 与补丁。没有 API 时先做离线测试即可。
+模型接口需支持 Chat Completions 原生 `tools` / `tool_calls`。模型选择工具与参数，程序构造 `Decision`、校验字段并序列化日志和工具反馈；不再解析普通回复中的决策 JSON。接口返回的参数仍需校验，格式错误会反馈给模型并消耗原有步数预算，不保证消除所有模型输出错误。本地兼容服务也需支持这一协议。没有 API 时先做离线测试即可。
 
 **强烈建议在临时的、可丢弃的 Git clone 中运行。** 示例：
 
@@ -73,8 +81,9 @@ python -m repo_agent --repo "E:\\Projects\\Work\\test-repo" `
 ```text
 repo_agent/
   agent.py        # 最小 Agent Loop + JSONL Trace
-  provider.py     # OpenAI-compatible LLM 接口
-  prompts.py      # JSON 决策协议
+  provider.py     # 原生 Function Calling 接口
+  decisions.py    # 程序定义的工具 Schema、Decision 和反馈包装
+  prompts.py      # 工具使用与验证要求
   tools.py        # 仓库读/查/补丁/定向测试工具
   __main__.py     # CLI
 examples/offline_smoke.py
