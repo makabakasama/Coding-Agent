@@ -12,7 +12,7 @@ Worktree 隔离文件修改，不是执行沙箱。
 - 使用 Conda 环境 `coding-agent`，Python 3.11.16；原有 6 项测试和离线闭环通过。
 - 本轮新增真实模型只读验证、固定版本 Worktree 创建、决策参数校验与测试字节码隔离。
 - 本轮 10 项单元测试通过，离线闭环通过。
-- 历史实验工作副本：`experiments/browser-use-5998`。
+- 原 seed 副本现标记为 `legacy-unlinked`，当前位置见 `runs/browser-use-5998/INDEX.md`。
 - base commit：`7be96ed8bafa8dfe1eef228b59cf5c884b8b2431`，本机已验证该提交存在并创建 detached Worktree。
 - 真实模型、缺陷复现、Agent 修复与独立回归验收仍待验证；不以本机工具测试代替这些结果。
 - 外部环境已创建，但依赖安装在下载构建依赖时长时间无进展，已中止；尚未安装完成。
@@ -54,21 +54,21 @@ Provider 统一读取项目根目录 `.env`，真实 Agent CLI 和连通性脚�
 已创建的工作副本可通过以下命令核对：
 
 ```powershell
-git -C experiments/browser-use-5998 rev-parse HEAD
-git -C experiments/browser-use-5998 status --short
+git -C experiments/browser-use/workspaces/5998_20261026-175230_22903996_agent rev-parse HEAD
+git -C experiments/browser-use/workspaces/5998_20261026-175230_22903996_agent status --short
 ```
 
 需要额外新建实验副本时使用新目录，工具会拒绝覆盖已有目录：
 
 ```powershell
-conda run -n coding-agent python -m repo_agent.workspace --source experiments/browser-use-source --destination experiments/browser-use-5998-run02 --revision 7be96ed8bafa8dfe1eef228b59cf5c884b8b2431
+conda run -n coding-agent python -m examples.browser_use_5998 --prepare
 ```
 
-外部仓库使用独立环境 `experiments/browser-use-env`，避免依赖污染 Agent 环境。
-本轮已尝试以下安装，网络恢复后可继续：
+外部仓库使用独立环境 `experiments/browser-use/inputs/env`，避免依赖污染 Agent 环境。
+现有环境已迁移并保留原依赖；以下仅供首次安装参考，迁移后无需重装：
 
 ```powershell
-.\experiments\browser-use-env\Scripts\python.exe -m pip install --timeout 15 --retries 1 -e .\experiments\browser-use-5998 pytest pytest-asyncio pytest-xdist pytest-timeout
+.\experiments\browser-use\inputs\env\Scripts\python.exe -m pip install --timeout 15 --retries 1 pytest pytest-asyncio pytest-xdist pytest-timeout
 ```
 
 安装对应历史源码及 pytest 插件后，先执行 Issue 原始复现，记录完整错误、
@@ -82,7 +82,7 @@ conda run -n coding-agent python -m repo_agent.workspace --source experiments/br
 4. 独立重跑回归用例及相关现有测试，检查是否修改或弱化测试。
 5. 完成首轮记录后再对照 PR #5999，分析定位、编辑、环境、验证各环节的问题。
 
-首轮 Agent 调用使用 `--test-python experiments/browser-use-env/Scripts/python.exe`
+Agent 调用使用 `--test-python experiments/browser-use/inputs/env/Scripts/python.exe`
 将测试执行器指向外部仓库环境。该路径在启动时解析为绝对路径。
 
 ## 4. 原生工具调用接口验证
@@ -171,13 +171,14 @@ conda run --no-capture-output -n coding-agent python -m examples.browser_use_599
 输出的 `manifest` 可传给 `--check-manifest` 或 `--manifest`；这两种模式与 `--prepare`
 互斥。不要手动将旧副本路径替换进清单。
 
-每轮材料位于 `runs/browser-use-5998/<run_id>/`，包括准备清单、冻结的 R、G+R 差异、
+独立准备材料位于 `runs/browser-use-5998/prepare_<ID>/repair/`，包括准备清单、冻结的 R、G+R 差异、
 文件哈希、环境依赖、导入探针、完整测试 stdout/stderr 和 JUnit 结果。准备失败返回 1，
 保留失败阶段、原因、已有日志及副本；不自动删除或重置。新 worktree 位于
-`experiments/browser-use-5998-<run_id>`，旧实验副本保持原状。
+`experiments/browser-use/workspaces/5998_<ID>_agent`。ID 为北京时间 `YYYYMMDD-HHMMSS_<8位ID>`；
+历史副本已按显式迁移映射重命名，原始证据字节保持不变。
 
 prepare 只自动化准备与基线验证，运行入口另行保存认领状态和 Agent 轨迹；
-完整环境与 Agent 源码归档仍待集成；独立补丁验收见第 9 节。
+完整环境归档仍待实现；Agent 允许范围的磁盘源码归档见第 12 节，独立补丁验收见第 9 节。
 
 ## 8. 自动导出候选 P 与运行结果
 
@@ -207,7 +208,7 @@ HEAD 或暂存区，也不能自动进入独立验收。未跟踪文件与其他
 轨迹缺失、导出失败等情况会保留已有材料并禁止自动进入独立验收；状态分别记录，
 不会用导出错误覆盖原始 Agent 失败。独立验收通过 `--verify` 自动另建干净副本。
 
-Agent 的测试反馈仍沿用工具当前的输出截断；完整输出保存尚未接入 Agent 测试工具。
+Agent 的测试反馈仍有界；受控运行的完整工具测试日志与源码证据见第 12 节。
 prepare 的完整 stdout/stderr 与 JUnit 保存不受此限制。
 
 ## 9. 独立重放验收已保存的 P
@@ -223,7 +224,7 @@ conda run --no-capture-output -n coding-agent python -m examples.browser_use_599
 终止状态、实验配置、导出资格、保护范围及哈希。空 P、损坏或不合格材料会被拒绝，
 不会从原工作副本重新生成补丁。原副本即使后来改变，也不能改变保存的候选输入。
 
-每次调用在 `runs/browser-use-5998/verify_<时间>_<唯一ID>/` 新建证据目录，
+每次调用在原轮次下按顺序新建 `verify-01/`、`verify-02/` 等证据目录，
 主报告为 `verification.json`。输入副本放在 `inputs/`；复用 prepare 创建的全新 G+R
 副本及基线证据位于本次 `baseline/` 下，报告记录准确的工作副本和清单位置。
 重复验收同一候选也会新建副本与目录，不覆盖、认领或修改原运行记录。
@@ -253,5 +254,140 @@ conda run --no-capture-output -n coding-agent python -m examples.browser_use_599
 验证哈希用于检测材料意外变化，不能抵抗同时篡改所有材料与哈希；测试执行仍非沙箱。
 文件核对覆盖已跟踪及未忽略文件，不覆盖依赖安装内容、被忽略文件或瞬时修改后恢复，
 不提供跨进程锁。显式非敏感测试环境按准备约定重建，其中 `{run_dir}` 指向新证据目录；
-其余继承进程环境，完整 Agent 源码/环境归档与 Agent 工具完整日志仍待后续实现。
+其余继承进程环境。允许范围的 Agent 磁盘源码与工具测试完整日志见第 12 节；
+完整依赖/环境镜像和已加载代码证明仍不在当前实现范围。
 `runs/` 和 `experiments/` 仍被 Git 忽略，本机留存不等于远端备份。
+
+## 10. 有界传输重试与真实运行
+
+Provider 在同一次决策请求中，默认最多额外重试 2 次，即总共最多 3 次 HTTP 尝试；
+重试前依次等待 0.5 秒和 1 秒。单次 `urlopen` 沿用原有的 `timeout` 设置（默认 90 秒），
+不是整轮运行的总时限。构造 Provider 时可通过 `max_retries=0..2` 减少或关闭重试，
+本次没有增加 `.env`、模型切换或实验入口配置。
+
+只对类型明确的 TLS EOF、连接重置/中断、响应读取中断和超时重试，包括
+`URLError.reason` 包裹的这些异常。仅凭异常字符串提到 EOF 不足以触发重试。
+证书验证失败、其他 TLS 错误、所有 HTTP 错误（包括 401/403、429、5xx）、
+DNS 等未纳入的请求错误、非法 JSON/响应结构、`finish_reason=length` 均不重试。
+非法工具参数仍由现有 `DecisionError` 路径反馈给模型，占用下一决策步修正。
+
+重试复用本次请求已序列化的完整 messages 和 payload，不重新开始 Agent 循环、
+截断上下文或重新执行已成功的本地工具。`MAX_STEPS` 仍是决策步数预算，
+内部 HTTP 重试不增加决策步数，但会增加请求次数与等待时间。相同请求重发不保证
+服务端只处理一次、返回相同决策或只计费一次；这不等于服务端的幂等机制。
+
+日志通过可选的模型事件回调接入 Agent，实验管理代码不处理 HTTP 细节：
+
+- JSONL 首条 `start` 记录 `max_steps`、`step_budget_unit=model_decisions` 和
+  `model_runtime.transport_retry` 中的有效尝试上限、单次超时、退避间隔及 HTTP 重试策略。
+- `model_request_attempt` 记录当前 `step`、`attempt`、`max_attempts`。失败时立即写入
+  异常类型、原因类型、固定原因分类、是否可重试、是否继续以及下一次等待秒数。
+  耗尽后的最后一次事件也会保留，随后 Agent 按原行为记录 `error` 并结束本轮。
+- `outcome=response_received` 仅表示收到并解析了 JSON 响应，不代表决策合法、工具执行
+  成功或修复完成。日志不保存原始异常文本、URL、请求头、Authorization 或密钥；
+  最终 `ProviderError` 保留脱敏的异常类型/原因分类及 HTTP 状态码（如有）。
+
+模型/profile/接口和 TLS 证书校验保持原样，不自动切换或关闭校验。重试耗尽仍是失败，
+不据此归因于 Python 版本、密钥或某个网络节点。离线模拟通过不能证明实际网络已恢复。
+
+历史失败轮 `20261026T082904Z_dfb6ee2a` 保留原状：前三个只读工具成功，step 4
+发生 TLS EOF，未编辑业务代码、未运行测试，P 为空且导出为 `no_code_change`，不应进入
+补丁验收。修复请求容错后，真实命令仍由用户自己执行：重新 `--prepare`，
+检查新清单，再对新清单执行 `--manifest`。不要重用或清理上述旧失败副本。
+
+## 11. 日常一次启动完整实验
+
+准备好本机模型配置后，由用户自己执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m examples.browser_use_5998 --run
+```
+
+**`--run` 会真实调用模型 API**。它不接收旧清单，且与 `--prepare`、`--manifest`、
+`--check-manifest`、`--verify` 互斥。程序直接调用已有 Python 函数，连续完成：
+新 G+R 准备与缺陷复现 → Agent 修复 → 候选 P 导出/完整性审查 → 新副本独立验收
+→ 最终总报告。准备失败时不会构造 Provider，也不会启动模型。
+
+总报告从启动开始保存在新的
+`runs/browser-use-5998/run_<ID>/experiment.json`，分阶段原子更新；同轮保存中文 `summary.md`。
+准备与 Agent 材料放 `repair/`，首次独立验收放 `verify-01/`，共用一次分配的 ID，通过报告中的 `prepare_manifest`、
+`workspace`、`agent_record`、`candidate_report`、`verification_report` 和
+`verification_workspace` 精确关联；对应副本为 `5998_<ID>_agent` 与 `5998_<ID>_verify-01`。
+后续 `--verify` 追加 `verify-02`，不修改原 `experiment.json` 的历史成功事实。
+准备初次落盘就提供路径回调，所以即使准备途中中断，总报告也能指向对应清单与副本。
+终端最后输出总报告及其路径。
+
+自动验收的门槛只看导出结果：`status=candidate_exported` 且
+`eligible_for_verification` 严格为布尔 `true`。Agent 正常 finish、`error`、
+`step_limit` 或外层运行异常，只要留下通过审查的 P，都会进入独立验收；不会依赖
+Agent 的 `last_test_passed`。例如修复后遇到 HTTP 429 结束，报告仍可同时显示
+`agent_status=error`、`verification_status=independently_verified`，原失败原因保持不变。
+
+空 P、保护文件违规、导出失败或启动拒绝时，保存 `verification_status=skipped` 和
+具体的 `verification_skip_reason`；已有清单、轨迹、部分材料与副本均保留。
+用户 Ctrl+C 是停止请求：Agent/导出后不再自动启动验收；验收内部已中断也不会补跑。
+导出中断不会将已经完成的 Agent 状态改写成模型失败，另记中断阶段。
+
+`--run` 的退出码按最终独立验收定义：
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 完整独立验收通过，即使原 Agent 状态为 `error` 或 `step_limit` |
+| `1` | 准备/运行/导出/验收失败，或因没有合格 P 而跳过验收 |
+| `130` | 用户中断，停止后续阶段 |
+
+总报告分别保留 `agent_status`、`agent_exit_code`、`export_status`、
+`verification_status` 与 `verification_result`，不覆盖原 Agent 或原验收报告来制造成功。
+因此总退出码 0 仅证明保存补丁的完整独立重放通过，不证明模型正常结束、整个项目无误
+或模型重复运行仍会成功。原 `--manifest` 保持单阶段行为，其退出码不等于独立验收结论。
+手动阶段入口仍可用于调试，`--verify <原清单>` 可用于复验已保存候选，重复验收继续新建副本。
+
+串联入口不增加 Docker、断点恢复或新测试范围；固定测试、G/R/P
+检查、有限网络重试与非沙箱限制均沿用既有实现。总报告不代表 `runs/` 或 `experiments/`
+已备份到远端。离线临时仓库测试通过不能冒充新的真实 #5998 运行。
+
+## 12. 新运行的测试日志与 Agent 磁盘源码证据
+
+以下功能仅对加入它们之后的新运行生效。历史成功轮
+历史成功轮现位于 `run_20261026-175230_22903996`，原 `pipeline_20261026T095230Z_22903996` 的字节证据保持原样，不能声称该轮已经保存
+下面新增的日志或源码快照；本轮开发没有回填或重跑那份材料。
+
+`run_prepared` 为手动 `--manifest` 和总控 `--run` 默认启用同轮 `test-logs/`，
+目录位于证据目录内、被测 worktree 外。通用 `RepoTools` 构造仍默认不写日志，
+需要时可显式传入 `test_log_dir`；被测仓库内部的日志目录会被拒绝。
+每次 `run_tests` 使用新的 `test_<UUID>/`，保存完整 `stdout.txt`、`stderr.txt` 和
+`metadata.json`：实际命令、cwd、测试解释器、超时、退出码、是否超时/中断、各流字节数
+及 SHA256。超时保留异常携带的部分输出，bytes 原样保存、str 按 UTF-8 编码。
+移除 `--disable-warnings`，使 pytest 警告正文也保存在完整日志中。
+
+模型仍只收到合并输出末尾最多 6000 字符、`output_truncated`，以及 `test_log` 的
+ID、文件路径、大小与哈希；完整输出不进入模型上下文，也没有新增工具或改变决策协议。
+日志初始化失败时不启动测试；测试完成后落盘失败则 `passed=false`，同时保留实际
+`exit_code` 和 `logging_failed`，不能把退出码 0 伪报为证据已记录的通过。
+若磁盘不可写，已有部分文件保留，记录 `write_failed`，不自动清理或复用旧 ID。
+
+日志元数据只保存显式测试设置中的固定允许项：`ANONYMIZED_TELEMETRY`、
+`BROWSER_USE_CONFIG_DIR`、`PYTHONHASHSEED`、`PYTHONUTF8`、`PYTHONIOENCODING`、
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD`；不会复制整个进程环境或配置密钥。测试进程仍沿用
+原来的环境继承方式，输出流原样保存，当前不提供对测试自身打印内容的自动脱敏或隔离。
+
+模型启动前在同轮 `agent-source/` 独占创建初始快照。源码根从归档模块的实际
+`__file__` 确定，不跟随实验夹具或入口中的 `PROJECT_ROOT`：只复制非隐藏的
+`repo_agent/*.py` 直接子文件和 `examples/browser_use_5998.py`，保留相对结构、
+逐文件字节数/SHA256。未提交和未跟踪的允许范围源码也会复制；符号链接/重定向路径
+不进入快照。不会遍历嵌套目录，不复制 `.env`、`.git`、实验材料或整个工作目录。
+清单另存可用的 Git HEAD、仅相关源码的未提交/未跟踪状态，以及执行 Agent 的
+Python 路径/版本、平台和 OpenSSL 版本。非 Git 来源或 Git 元数据不可用时如实标注，
+不因此放弃已经捕获的磁盘源码。
+
+初始捕获失败或捕获期间源码已漂移，不启动模型。运行后写入新的
+`source-check_<UUID>.json` 检查磁盘源码及初始快照是否改变，保留原快照与最初哈希，
+不静默覆盖。最终 `agent-run.json`、工具轨迹与总报告可通过 `agent_source`、
+`agent_source_check` 和 `test_logs` 定位材料。
+`evidence_status=recorded` 表示本范围证据已记录；`source_drift` 表示源码发生漂移；
+`incomplete` 表示捕获、检查或日志存在缺口。这些字段与 Agent/补丁验收状态分开，
+不抹去原运行结果；完整补丁验收通过也不能掩盖 `incomplete`。
+
+这是磁盘源码快照，不是进程内存、已加载字节码或完整测试环境/依赖镜像。
+运行后的检查不是持续文件锁，不能识别改动后又恢复的瞬时变化，也不承诺磁盘快照与
+进程已加载源码绝对一致。没有新增 Docker、依赖导出系统、加载 hook、限流或上下文压缩。

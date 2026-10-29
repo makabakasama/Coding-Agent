@@ -1,0 +1,113 @@
+--- a/tests/test_messages.py
++++ b/tests/test_messages.py
+@@ -4,6 +4,7 @@
+ import re
+ import subprocess
+ import sys
++import tempfile
+ import warnings
+ from collections.abc import Sequence
+ from dataclasses import replace
+@@ -3619,3 +3620,102 @@
+     agent = Agent(TestModel())
+     with pytest.raises(ValueError, match='must be a `str` or a sequence of `UserContent` items, got `dict`'):
+         await agent.run(cast(Any, {'name': 'John'}))
++
++
++# Frozen experiment regression: pytest stays unoptimized, only the child uses -O.
++_ISSUE_10525_CHILD = r"""
++import json
++from pathlib import Path
++import sys
++import pydantic_ai.messages as messages
++import pydantic_graph
++
++root = Path(sys.argv[1]).resolve()
++expected_optimization = int(sys.argv[2])
++expected_cache = Path(sys.argv[3]).resolve()
++expected_module = root / 'pydantic_ai_slim/pydantic_ai/messages.py'
++expected_graph = root / 'pydantic_graph/pydantic_graph/__init__.py'
++if sys.flags.optimize != expected_optimization:
++    raise RuntimeError('Unexpected child optimization mode')
++if Path(messages.__file__).resolve() != expected_module.resolve():
++    raise RuntimeError('Child imported messages from outside this worktree')
++if Path(pydantic_graph.__file__).resolve() != expected_graph.resolve():
++    raise RuntimeError('Child imported graph from outside this worktree')
++if not sys.pycache_prefix or Path(sys.pycache_prefix).resolve() != expected_cache:
++    raise RuntimeError('Child did not inherit its isolated bytecode cache')
++print('ISSUE10525_PROVENANCE=' + json.dumps({
++    'python': sys.executable, 'optimize': sys.flags.optimize,
++    'module_file': messages.__file__, 'graph_file': pydantic_graph.__file__,
++    'pycache_prefix': sys.pycache_prefix,
++}), flush=True)
++valid_failures = []
++for raw, expected in (
++    ('{"key": "value"}', {'key': 'value'}), ({'key': 'value'}, {'key': 'value'}),
++    ('{}', {}), ({}, {}), (None, {}), ('', {}),
++):
++    result = messages.ToolCallPart(tool_name='example', args=raw).args_as_dict()
++    if result != expected:
++        valid_failures.append({'raw': repr(raw), 'wrong_valid_value': repr(result)})
++for raw in ('{"id": "capability-example"}', {'id': 'capability-example'}):
++    if messages.LoadCapabilityCallPart(args=raw).capability_id != 'capability-example':
++        valid_failures.append({'raw': repr(raw), 'wrong_valid_capability': True})
++if valid_failures:
++    print('PYDANTIC_AI_10525_' + 'VALID_CONTROL_FAILURE', flush=True)
++    print(json.dumps(valid_failures), flush=True)
++    raise SystemExit(24)
++failures = []
++for raw in ('[]', '[1, 2, 3]', '"text"', '1', 'true', 'null'):
++    expected = {messages.INVALID_JSON_KEY: raw}
++    result = messages.ToolCallPart(tool_name='example', args=raw).args_as_dict()
++    if result != expected:
++        failures.append({'raw': raw, 'wrong_default': repr(result)})
++    try:
++        capability = messages.LoadCapabilityCallPart(args=raw).capability_id
++    except AttributeError as exc:
++        failures.append({'raw': raw, 'capability_error': type(exc).__name__})
++    else:
++        if capability is not None:
++            failures.append({'raw': raw, 'unexpected_capability': repr(capability)})
++if failures:
++    print('PYDANTIC_AI_10525_' + 'BEHAVIOR_MISMATCH', flush=True)
++    print(json.dumps(failures), flush=True)
++    raise SystemExit(23)
++print('ISSUE10525_CONTRACT_OK', flush=True)
++"""
++
++
++def _run_issue_10525_child(optimized: bool, capsys: pytest.CaptureFixture[str]) -> None:
++    if sys.flags.optimize != 0:
++        pytest.fail('Run parent pytest without optimization', pytrace=False)
++    root = Path(__file__).resolve().parents[1]
++    with tempfile.TemporaryDirectory(prefix='issue10525-pycache-') as fallback_cache:
++        cache = sys.pycache_prefix or fallback_cache
++        command = [sys.executable, '-X', f'pycache_prefix={cache}']
++        if optimized:
++            command.append('-O')
++        command.extend(['-c', _ISSUE_10525_CHILD, str(root), str(int(optimized)), str(cache)])
++        child = subprocess.run(command, cwd=root, capture_output=True, text=True,
++                               encoding='utf-8', errors='replace', timeout=30)
++    # Preserve child provenance even when the outer test passes.
++    with capsys.disabled():
++        print(child.stdout, end='')
++        print(child.stderr, end='', file=sys.stderr)
++    marker = 'PYDANTIC_AI_10525_' + 'BEHAVIOR_MISMATCH'
++    if child.returncode == 23 and marker in child.stdout.splitlines():
++        pytest.fail(child.stdout + child.stderr, pytrace=False)
++    valid_marker = 'PYDANTIC_AI_10525_' + 'VALID_CONTROL_FAILURE'
++    if child.returncode == 24 and valid_marker in child.stdout.splitlines():
++        pytest.fail(child.stdout + child.stderr, pytrace=False)
++    if child.returncode != 0 or 'ISSUE10525_CONTRACT_OK' not in child.stdout.splitlines():
++        pytest.fail('Child environment/execution failure, not the target behavior:\n' + child.stdout + child.stderr,
++                    pytrace=False)
++
++
++@pytest.mark.subprocess(reason='checks the message contract in an explicitly optimized interpreter')
++def test_issue_10525_non_object_json_optimized(capsys: pytest.CaptureFixture[str]) -> None:
++    _run_issue_10525_child(True, capsys)
++
++
++@pytest.mark.subprocess(reason='controls the same message contract in a normal interpreter')
++def test_issue_10525_non_object_json_normal(capsys: pytest.CaptureFixture[str]) -> None:
++    _run_issue_10525_child(False, capsys)

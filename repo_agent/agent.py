@@ -35,13 +35,24 @@ class Agent:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": "Coding task:\n" + task + "\nRepository is already checked out locally."},
         ]
-        self._record({"type": "start", "task": task, "repo": str(self.tools.root),
-                      "decision_protocol": "native_tool_calls"})
+        start = {"type": "start", "task": task, "repo": str(self.tools.root),
+                 "decision_protocol": "native_tool_calls", "max_steps": self.max_steps,
+                 "step_budget_unit": "model_decisions"}
+        metadata = getattr(self.model, "get_run_metadata", None)
+        if callable(metadata):
+            start["model_runtime"] = metadata()
+        self._record(start)
         last_test_passed = None
         applied_patches = 0
         actions = 0
         for step in range(1, self.max_steps + 1):
+            # Optional model events are logged immediately with the current step.
+            # Fake/offline models need only implement decide(); no HTTP knowledge here.
+            set_sink = getattr(self.model, "set_event_sink", None)
+            previous_sink = None
             try:
+                if callable(set_sink):
+                    previous_sink = set_sink(lambda event: self._record({**event, "step": step}))
                 decision = self.model.decide(messages)
                 if not isinstance(decision, Decision):
                     raise TypeError("Model.decide must return a Decision")
@@ -59,6 +70,9 @@ class Agent:
                 self._record({"type": "error", "step": step, "error": err})
                 return {"status": "error", "reason": err, "steps": step,
                         "last_test_passed": last_test_passed, "trace": str(self.trace_path)}
+            finally:
+                if callable(set_sink):
+                    set_sink(previous_sink)
             self._record({"type": "decision", "step": step, **decision.as_dict(),
                           "tool_call_id": decision.tool_call_id})
             if action == "finish":

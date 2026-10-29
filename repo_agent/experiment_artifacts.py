@@ -7,11 +7,13 @@ from pathlib import Path
 import re
 
 from .experiments import _files, _git, _sha
+from .path_migrations import recorded_path
 
 
 def export_run_artifacts(baseline: dict, receipt: dict) -> dict:
     """Retain results on failure too; never reset, stage, commit, or run tests."""
-    directory = Path(baseline["manifest"]).resolve().parent
+    migration = Path(receipt["path_migrations"]) if receipt.get("path_migrations") else None
+    directory = recorded_path(baseline["manifest"], migration).parent
     destination = directory / "artifacts"
     destination.mkdir(exist_ok=False)
     report = {
@@ -28,7 +30,7 @@ def export_run_artifacts(baseline: dict, receipt: dict) -> dict:
     save()
     try:
         report["stage"] = "baseline_evidence"
-        manifest_path = Path(baseline["manifest"])
+        manifest_path = recorded_path(baseline["manifest"], migration)
         if _sha(manifest_path.read_bytes()) != receipt["manifest_sha256"]:
             raise ValueError("Preparation manifest changed after the run was claimed")
         for filename, key in (("baseline-files.json", "baseline_files_sha256"),
@@ -37,7 +39,7 @@ def export_run_artifacts(baseline: dict, receipt: dict) -> dict:
             if baseline.get(key) is not None and _sha((directory / filename).read_bytes()) != baseline[key]:
                 raise ValueError("Saved baseline evidence changed: " + filename)
         before = json.loads((directory / "baseline-files.json").read_text(encoding="utf-8"))
-        workspace = Path(baseline["workspace"]).resolve(strict=True)
+        workspace = recorded_path(baseline["workspace"], migration).resolve(strict=True)
         allowed = receipt["editable_paths"]
         if not allowed:
             raise ValueError("Run has no recorded implementation edit policy")
@@ -70,7 +72,7 @@ def export_run_artifacts(baseline: dict, receipt: dict) -> dict:
         edit_hashes = {name: before[name]["sha256"] for name in allowed}
         trace_valid = False
         if receipt.get("trace"):
-            trace = Path(receipt["trace"]).resolve(strict=True)
+            trace = recorded_path(receipt["trace"], migration).resolve(strict=True)
             if not trace.is_relative_to(directory / "agent"):
                 raise ValueError("Trace is outside this run's agent directory")
             trace_bytes = trace.read_bytes()

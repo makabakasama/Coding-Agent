@@ -17,7 +17,9 @@ def create_worktree(source: Path, destination: Path, revision: str, *,
         raise ValueError("A commit or revision is required")
 
     def git(*args):
-        options = [item for key, value in (git_config or {}).items()
+        # Per-command only; callers may explicitly override for controlled tests.
+        config = {"core.longpaths": "true", **(git_config or {})}
+        options = [item for key, value in config.items()
                    for item in ("-c", f"{key}={value}")]
         return subprocess.run(["git", *options, "-C", str(source), *args], check=True,
                               capture_output=True, text=True, encoding="utf-8",

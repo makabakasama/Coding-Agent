@@ -8,9 +8,11 @@ import os
 from pathlib import Path
 import subprocess
 import uuid
+from .path_migrations import recorded_path, recorded_environment
+from .round_layout import ID_PATTERN, allocate_round, allocate_verification, find_round, write_summary
 
 from .experiments import (ExperimentSpec, _files, _git, _read_provenance,
-                          _run_import_probe, _run_test, _sha, prepare_experiment)
+                          _run_import_probe, _run_test, _sha, prepare_experiment, experiment_environment)
 
 
 def _object(data: bytes) -> dict:
@@ -22,8 +24,16 @@ def _object(data: bytes) -> dict:
 
 def _read_candidate(path: Path, spec: ExperimentSpec, destination: Path, evidence: dict) -> dict:
     """Read frozen materials, not the former Agent workspace's current files."""
-    path = path.resolve(strict=True)
+    path = recorded_path(path, spec.path_migrations).resolve(strict=True)
     directory = path.parent
+    migration_bytes = None
+    if spec.path_migrations is not None and spec.path_migrations.exists():
+        migration_bytes = spec.path_migrations.read_bytes()
+        (destination / "path-migrations.json").write_bytes(migration_bytes)
+        evidence["path_migrations"] = {"path": str(spec.path_migrations.resolve()),
+                                       "sha256": _sha(migration_bytes)}
+    def located(value):
+        return recorded_path(value, spec.path_migrations)
     inputs = destination / "inputs"
     inputs.mkdir()
 
@@ -43,8 +53,8 @@ def _read_candidate(path: Path, spec: ExperimentSpec, destination: Path, evidenc
     receipt = _object(read("agent-run.json"))
     if receipt.get("manifest_sha256") != _sha(baseline_bytes):
         raise ValueError("Preparation manifest changed after claim")
-    if (Path(baseline["manifest"]).resolve() != path
-            or Path(receipt["manifest"]).resolve() != path
+    if (located(baseline["manifest"]) != path
+            or located(receipt["manifest"]) != path
             or receipt.get("workspace") != baseline["workspace"]):
         raise ValueError("Manifest/run identity mismatch")
     if (baseline.get("status") != "baseline_verified" or baseline.get("stage") != "complete"
@@ -62,14 +72,20 @@ def _read_candidate(path: Path, spec: ExperimentSpec, destination: Path, evidenc
         "regression_target": spec.regression_target, "control_targets": list(spec.control_targets),
         "failure_contains": spec.failure_contains, "import_module": spec.import_module,
         "test_timeout": spec.test_timeout,
-        "test_environment": {k: v.replace("{run_dir}", str(directory)) for k, v in spec.environment.items()},
+        "test_environment": experiment_environment(spec, directory, located(baseline["workspace"])),
     }
     for key, expected in fields.items():
-        if baseline.get(key) != expected:
+        actual = baseline.get(key)
+        if key in ("source", "test_python"):
+            actual = str(located(actual))
+        elif key == "test_environment":
+            actual = recorded_environment(actual, spec.path_migrations)
+            expected = recorded_environment(expected, spec.path_migrations)
+        if actual != expected:
             raise ValueError("Recorded experiment configuration differs: " + key)
     provenance = baseline["provenance"]
-    if (Path(provenance["python"]).resolve() != spec.test_python.resolve()
-            or not Path(provenance["module_file"]).resolve().is_relative_to(Path(baseline["workspace"]).resolve())
+    if (located(provenance["python"]) != spec.test_python.resolve()
+            or not located(provenance["module_file"]).is_relative_to(located(baseline["workspace"]))
             or not isinstance(provenance["packages"], dict) or not provenance.get("version")):
         raise ValueError("Original import provenance is inconsistent")
     allowed = list(spec.editable_paths)
@@ -94,7 +110,7 @@ def _read_candidate(path: Path, spec: ExperimentSpec, destination: Path, evidenc
                 or before.get(name) != {"sha256": _sha(_git(spec.source, "show", base + ":" + name))}):
             raise ValueError("Invalid editable file or R overlaps implementation: " + name)
     report = _object(read("artifacts/report.json"))
-    if Path(report["report"]).resolve() != directory / "artifacts/report.json":
+    if located(report["report"]) != directory / "artifacts/report.json":
         raise ValueError("Export report identity mismatch")
     summary = receipt.get("artifacts", {})
     for key in ("status", "report", "eligible_for_verification", "independently_verified"):
@@ -113,7 +129,7 @@ def _read_candidate(path: Path, spec: ExperimentSpec, destination: Path, evidenc
     for key in ("protected_paths_changed", "protected_edits_in_trace", "inconsistent_tool_edits"):
         if integrity.get(key) != []:
             raise ValueError("Export integrity check failed: " + key)
-    trace = Path(receipt["trace"]).resolve(strict=True)
+    trace = located(receipt["trace"]).resolve(strict=True)
     if not trace.is_relative_to(directory / "agent"):
         raise ValueError("Trace is outside original Agent directory")
     read(trace.relative_to(directory).as_posix(), report["trace_sha256"])
@@ -124,19 +140,21 @@ def _read_candidate(path: Path, spec: ExperimentSpec, destination: Path, evidenc
     if any(set(final.get(name, {})) != {"sha256"} for name in allowed):
         raise ValueError("Implementation is missing or is not a regular file")
     candidate = report["patch"]
-    if (Path(candidate["path"]).resolve() != directory / "artifacts/agent.patch"
+    if (located(candidate["path"]) != directory / "artifacts/agent.patch"
             or candidate.get("changed_paths") != changed):
         raise ValueError("Candidate identity or changed paths mismatch")
     patch = read("artifacts/agent.patch", candidate["sha256"])
     if not patch.strip() or candidate.get("bytes") != len(patch):
         raise ValueError("Empty candidate or patch size mismatch")
+    if migration_bytes is not None and spec.path_migrations.read_bytes() != migration_bytes:
+        raise ValueError("Path migration map changed while reading candidate")
     return {"baseline": baseline, "agent_status": status, "evidence": evidence,
             "before": before, "final": final, "patch": patch, "patch_sha256": _sha(patch),
             "regression": regression, "allowed": allowed, "changed": changed}
 
 
 def _capture_git(root: Path, args: list[str], data: bytes, directory: Path, label: str) -> dict:
-    command = ["git", "-c", "safe.directory=" + root.as_posix(), "-c", "core.autocrlf=false",
+    command = ["git", "-c", "safe.directory=" + root.as_posix(), "-c", "core.autocrlf=false", "-c", "core.longpaths=true",
                "-C", str(root), *args]
     try:
         proc = subprocess.run(command, input=data, capture_output=True, timeout=120)
@@ -151,12 +169,25 @@ def _capture_git(root: Path, args: list[str], data: bytes, directory: Path, labe
 
 
 def verify_experiment(manifest_path: Path, *, expected_spec: ExperimentSpec,
-                      workspace_parent: Path, trace_parent: Path) -> dict:
+                      workspace_parent: Path, trace_parent: Path,
+                      round_directory: Path | None = None) -> dict:
     """Retain every attempt; original run records/workspaces are never changed."""
     spec = expected_spec
-    run_id = "verify_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8]
-    directory = (trace_parent / spec.name / run_id).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
+    manifest_path = recorded_path(manifest_path, spec.path_migrations)
+    round_directory = round_directory or find_round(manifest_path)
+    if round_directory is None:
+        round_directory, _ = allocate_round(trace_parent / spec.name, "legacy", spec.name)
+    round_directory = round_directory.resolve(strict=True)
+    expected_parent = (trace_parent / spec.name).resolve()
+    if round_directory == expected_parent or not round_directory.is_relative_to(expected_parent):
+        raise ValueError("Verification round is outside the experiment records area")
+    metadata = _object((round_directory / "round.json").read_bytes())
+    if (metadata.get("experiment") != spec.name or not ID_PATTERN.fullmatch(str(metadata.get("round_id", "")))
+            or metadata.get("entry") not in ("run", "prepare", "legacy")
+            or round_directory.name != metadata["entry"] + "_" + metadata["round_id"]):
+        raise ValueError("Verification round metadata does not match this experiment")
+    run_id = metadata["round_id"]
+    directory, role = allocate_verification(round_directory)
     report = {"status": "verifying", "stage": "validate_materials", "run_id": run_id,
               "report": str(directory / "verification.json"), "original_manifest": str(manifest_path.resolve()),
               "independently_verified": False, "model_started": False, "is_execution_sandbox": False,
@@ -181,7 +212,8 @@ def verify_experiment(manifest_path: Path, *, expected_spec: ExperimentSpec,
         replay_spec = replace(spec, revision=report["base_commit"], regression_patch=candidate["regression"],
                               regression_sha256=candidate["baseline"].get("regression_patch_sha256"))
         baseline = prepare_experiment(replay_spec, workspace_parent=workspace_parent,
-                                      trace_parent=directory / "baseline")
+                                      trace_parent=directory / "baseline", round_directory=round_directory,
+                                      round_id=run_id, record_subdir=role + "/baseline", workspace_role=role)
         report.update(baseline_manifest=baseline["manifest"], workspace=baseline["workspace"],
                       baseline_status=baseline["status"], baseline_tests=baseline["tests"],
                       test_environment=baseline["test_environment"], test_python=baseline["test_python"])
@@ -279,4 +311,5 @@ def verify_experiment(manifest_path: Path, *, expected_spec: ExperimentSpec,
             report["interrupted"] = True
     report["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
     save()
+    write_summary(round_directory, spec.path_migrations)
     return report

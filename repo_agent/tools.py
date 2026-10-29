@@ -13,6 +13,8 @@ import sys
 import tempfile
 import uuid
 
+from .run_evidence import sha256
+
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", ".mypy_cache",
              ".pytest_cache", "__pycache__", "dist", "build", ".tox", ".ruff_cache"}
 SKIP_FILES = {".env", ".env.local", "id_rsa", "id_ed25519"}
@@ -43,7 +45,8 @@ class RepoTools:
     """
     def __init__(self, root: Path, *, allow_writes: bool = False,
                  allow_tests: bool = False, test_timeout: int = 90,
-                 test_python: Path | None = None, test_env: dict[str, str] | None = None):
+                 test_python: Path | None = None, test_env: dict[str, str] | None = None,
+                 test_log_dir: Path | None = None):
         self.root = root.expanduser().resolve(strict=True)
         if not self.root.is_dir():
             raise ValueError("Repository root must be a directory")
@@ -51,6 +54,12 @@ class RepoTools:
         self.allow_tests = allow_tests
         self.test_timeout = test_timeout
         self.test_env = dict(test_env or {})
+        self.test_log_dir = test_log_dir.resolve() if test_log_dir is not None else None
+        if self.test_log_dir is not None:
+            if self.test_log_dir == self.root or self.test_log_dir.is_relative_to(self.root):
+                raise ValueError("Test logs must be outside the tested worktree")
+            self.test_log_dir.mkdir(parents=True, exist_ok=True)
+        self.test_log_records: list[dict] = []
         self._snapshots: dict[str, FileSnapshot] = {}
         self.test_python = str(test_python.resolve(strict=True)) if test_python else sys.executable
         if not Path(self.test_python).is_file():
@@ -273,7 +282,7 @@ class RepoTools:
                             "error": "File changed before patch application; call read_file again"}
             # Preserve the patch's line endings instead of inheriting a user's
             # global autocrlf conversion. This affects only this Git invocation.
-            args = ["git", "-c", "core.autocrlf=false", "-C", str(self.root), "apply"]
+            args = ["git", "-c", "core.autocrlf=false", "-c", "core.longpaths=true", "-C", str(self.root), "apply"]
             if extra:
                 args.append(extra)
             args.extend(["--whitespace=nowarn", "-"])
@@ -300,20 +309,74 @@ class RepoTools:
         if base.startswith("-") or any(c in target for c in ("\n", "\r", "\0")):
             raise ValueError("Invalid test target")
         self._path(base)
-        command = [self.test_python, "-m", "pytest", "-q", "--disable-warnings", "--maxfail=1", target]
-        try:
+        command = [self.test_python, "-m", "pytest", "-q", "--maxfail=1", target]
+        log = None
+        if self.test_log_dir is not None:
+            identifier = "test_" + uuid.uuid4().hex
+            log = {"id": identifier, "directory": str(self.test_log_dir / identifier), "status": "running"}
+            self.test_log_records.append(log)
+        with tempfile.TemporaryDirectory(prefix="repo-agent-pycache-") as cache:
             # Equal-size edits within one timestamp tick can reuse stale .pyc files.
             # Each verification must import the current source, not prior bytecode.
-            with tempfile.TemporaryDirectory(prefix="repo-agent-pycache-") as cache:
-                command[1:1] = ["-X", "pycache_prefix=" + cache]
+            command[1:1] = ["-X", "pycache_prefix=" + cache]
+            metadata = {"command": command, "cwd": str(self.root), "python": self.test_python,
+                        "target": target, "timeout_seconds": self.test_timeout,
+                        "test_environment": {k: v for k, v in self.test_env.items() if k in
+                            {"ANONYMIZED_TELEMETRY", "BROWSER_USE_CONFIG_DIR", "PYTHONPATH", "PYTHONHASHSEED",
+                             "PYTHONUTF8", "PYTHONIOENCODING", "PYTEST_DISABLE_PLUGIN_AUTOLOAD"}}}
+            if log is not None:
+                directory = Path(log["directory"])
+                try:
+                    directory.mkdir(exist_ok=False)
+                    self._save_test_metadata(directory, {**metadata, "id": log["id"], "status": "running"})
+                except OSError:
+                    log["status"] = "write_failed"
+                    return {"passed": False, "error": "Test log initialization failed; pytest not started", "test_log": log}
+            stdout, stderr, code, timed_out, interrupted, error = b"", b"", None, False, False, None
+            try:
                 result = subprocess.run(command, cwd=self.root, capture_output=True,
                                         env={**os.environ, **self.test_env},
-                                        text=True, encoding="utf-8", errors="replace",
                                         timeout=self.test_timeout)
-            return {"passed": result.returncode == 0, "exit_code": result.returncode,
-                    "output": (result.stdout + "\n" + result.stderr)[-6000:]}
-        except subprocess.TimeoutExpired:
-            return {"passed": False, "error": f"pytest timed out after {self.test_timeout}s"}
+                code, stdout, stderr = result.returncode, result.stdout, result.stderr
+            except subprocess.TimeoutExpired as exc:
+                timed_out, stdout, stderr = True, exc.stdout, exc.stderr
+                error = f"pytest timed out after {self.test_timeout}s"
+            except KeyboardInterrupt:
+                interrupted, error = True, "pytest interrupted by user"
+            except OSError as exc:
+                error = "pytest could not start: " + type(exc).__name__
+            stdout = stdout.encode("utf-8") if isinstance(stdout, str) else (stdout or b"")
+            stderr = stderr.encode("utf-8") if isinstance(stderr, str) else (stderr or b"")
+            output = stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")
+            answer = {"passed": code == 0 and error is None, "exit_code": code, "timed_out": timed_out,
+                      "output": output[-6000:], "output_truncated": len(output) > 6000}
+            if error:
+                answer["error"] = error
+            if log is not None:
+                try:
+                    streams = {}
+                    for name, data in (("stdout", stdout), ("stderr", stderr)):
+                        file = directory / (name + ".txt")
+                        file.write_bytes(data)
+                        streams[name] = {"path": str(file), "bytes": len(data), "sha256": sha256(data)}
+                    self._save_test_metadata(directory, {**metadata, "id": log["id"], "status": "recorded",
+                        "exit_code": code, "timed_out": timed_out, "interrupted": interrupted,
+                        "error": error, **streams})
+                    meta_path = directory / "metadata.json"
+                    log.update(status="recorded", metadata=str(meta_path), metadata_sha256=sha256(meta_path.read_bytes()), **streams)
+                except OSError as exc:
+                    log.update(status="write_failed", error_type=type(exc).__name__)
+                    answer.update(passed=False, error="Test output logging failed", logging_failed=True)
+                answer["test_log"] = dict(log)
+            if interrupted:
+                raise KeyboardInterrupt
+            return answer
+
+    @staticmethod
+    def _save_test_metadata(directory: Path, data: dict):
+        temporary = directory / "metadata.json.tmp"
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(directory / "metadata.json")
 
     def execute(self, action: str, args: dict) -> dict:
         handlers = {

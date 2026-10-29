@@ -57,7 +57,7 @@ class VerifyExperimentTest(unittest.TestCase):
 
     def remove_worktrees(self):
         # Only this synthetic test's disposable workspaces are removed.
-        for workspace in (self.root / "workspaces").glob("calculator-*"):
+        for workspace in (self.root / "workspaces").glob("calculator*"):
             self.assertTrue(workspace.resolve().is_relative_to(self.root.resolve()))
             self.git("worktree", "remove", "--force", str(workspace))
 

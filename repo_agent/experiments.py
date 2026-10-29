@@ -11,10 +11,13 @@ import platform
 import re
 import subprocess
 import tempfile
+from typing import Callable
 import uuid
 import xml.etree.ElementTree as ET
 
 from .workspace import create_worktree
+from .path_migrations import recorded_path, recorded_environment
+from .round_layout import allocate_round, workspace_name, write_summary
 
 
 @dataclass(frozen=True)
@@ -34,15 +37,22 @@ class ExperimentSpec:
     test_timeout: int = 90
     # Existing implementation files whose changes may form P; all others are protected.
     editable_paths: tuple[str, ...] = ()
+    path_migrations: Path | None = None
 
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def experiment_environment(spec: ExperimentSpec, directory: Path, workspace: Path) -> dict[str, str]:
+    """Map each stage's source imports to its own checkout, never an editable source clone."""
+    return {key: value.replace("{run_dir}", str(directory)).replace("{workspace}", str(workspace))
+            for key, value in spec.environment.items()}
+
+
 def _git(root: Path, *args: str, data: bytes | None = None) -> bytes:
     result = subprocess.run(
-        ["git", "-c", "safe.directory=" + root.as_posix(), "-c", "core.autocrlf=false",
+        ["git", "-c", "safe.directory=" + root.as_posix(), "-c", "core.autocrlf=false", "-c", "core.longpaths=true",
          "-C", str(root), *args], input=data, capture_output=True, timeout=120,
     )
     if result.returncode:
@@ -56,6 +66,12 @@ def _files(root: Path) -> dict:
     result = {}
     for name in sorted(set(os.fsdecode(n) for n in names.split(b"\0") if n)):
         path = root / name
+        # Git can check out these files while ordinary Win32 stat/open still
+        # report them missing. Preserve the inventory's relative keys and hash
+        # the actual files via the extended path namespace on Windows.
+        if os.name == "nt" and len(str(path)) >= 260 and not str(path).startswith("\\\\?\\"):
+            absolute = os.path.abspath(path)
+            path = Path("\\\\?\\UNC\\" + absolute[2:] if absolute.startswith("\\\\") else "\\\\?\\" + absolute)
         if path.is_symlink():
             result[name] = {"symlink": os.readlink(path)}
         elif path.is_file():
@@ -147,7 +163,9 @@ def _read_provenance(probe: dict, directory: Path, workspace: Path, python: Path
 
 
 def prepare_experiment(spec: ExperimentSpec, *, workspace_parent: Path,
-                       trace_parent: Path) -> dict:
+                       trace_parent: Path, on_created: Callable[[dict], None] | None = None,
+                       round_directory: Path | None = None, round_id: str | None = None,
+                       record_subdir: str = "repair", workspace_role: str = "agent") -> dict:
     """Return a durable success/failure manifest; retain failed workspaces too."""
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", spec.name):
         raise ValueError("Invalid experiment name")
@@ -157,11 +175,17 @@ def prepare_experiment(spec: ExperimentSpec, *, workspace_parent: Path,
         raise ValueError("Expected failure, control targets and positive timeout are required")
     source = spec.source.resolve()
     python = spec.test_python.resolve()
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8]
-    directory = (trace_parent / spec.name / run_id).resolve()
-    workspace = (workspace_parent / (spec.name + "-" + run_id)).resolve()
+    if round_directory is None:
+        round_directory, round_id = allocate_round(trace_parent / spec.name, "prepare", spec.name)
+    if round_id is None:
+        raise ValueError("Round identifier is required")
+    run_id = round_id
+    directory = (round_directory / record_subdir).resolve()
+    if not directory.is_relative_to(round_directory.resolve()) or directory == round_directory.resolve():
+        raise ValueError("Preparation records must remain below the round")
+    workspace = (workspace_parent / workspace_name(spec.name, run_id, workspace_role)).resolve()
     directory.mkdir(parents=True, exist_ok=False)
-    overrides = {k: v.replace("{run_dir}", str(directory)) for k, v in spec.environment.items()}
+    overrides = experiment_environment(spec, directory, workspace)
     environment = {**os.environ, **overrides}
     manifest = {
         "status": "preparing", "stage": "validate_inputs", "run_id": run_id,
@@ -184,6 +208,8 @@ def prepare_experiment(spec: ExperimentSpec, *, workspace_parent: Path,
 
     save()
     try:
+        if on_created is not None:
+            on_created(dict(manifest))
         if not source.is_dir() or not python.is_file():
             raise ValueError("Source directory and test interpreter are required")
         patch = spec.regression_patch.read_bytes() if spec.regression_patch else None
@@ -195,7 +221,7 @@ def prepare_experiment(spec: ExperimentSpec, *, workspace_parent: Path,
         manifest["stage"] = "create_worktree"
         save()
         created = create_worktree(source, workspace, spec.revision, git_config={
-            "safe.directory": source.as_posix(), "core.autocrlf": "false",
+            "safe.directory": source.as_posix(), "core.autocrlf": "false", "core.longpaths": "true",
         })
         manifest["base_commit"] = created["base_commit"]
         manifest["stage"] = "restore_regression"
@@ -255,11 +281,31 @@ def prepare_experiment(spec: ExperimentSpec, *, workspace_parent: Path,
         manifest.update(status="baseline_verified", stage="complete", baseline_files_unchanged=True)
     except (Exception, KeyboardInterrupt) as exc:
         manifest.update(status="preparation_failed", error_type=type(exc).__name__, error=str(exc))
+        if (isinstance(exc, (subprocess.CalledProcessError, subprocess.TimeoutExpired))
+                and isinstance(exc.cmd, (list, tuple)) and exc.cmd
+                and Path(exc.cmd[0]).stem.lower() == "git"):
+            outputs = {}
+            for stream in ("stdout", "stderr"):
+                output = getattr(exc, stream, None) or b""
+                data = output.encode("utf-8") if isinstance(output, str) else output
+                filename = "git-failure." + stream + ".txt"
+                (directory / filename).write_bytes(data)
+                outputs[stream] = filename
+                outputs[stream + "_sha256"] = _sha(data)
+                outputs[stream + "_bytes"] = len(data)
+            manifest["git_failure"] = {"command": [str(arg) for arg in exc.cmd],
+                "exit_code": getattr(exc, "returncode", None),
+                "timed_out": isinstance(exc, subprocess.TimeoutExpired), **outputs}
+            reason = (directory / outputs["stderr"]).read_text(encoding="utf-8", errors="replace").strip()
+            if reason:
+                manifest["error"] += "\n" + reason[-2000:]
         save()
         if isinstance(exc, KeyboardInterrupt):
+            write_summary(round_directory, spec.path_migrations)
             raise
     manifest["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
     save()
+    write_summary(round_directory, spec.path_migrations)
     return manifest
 
 
@@ -269,7 +315,7 @@ def validate_baseline(manifest_path: Path, *, expected_spec: ExperimentSpec) -> 
     This detects accidental drift, not malicious edits to both data and hashes.
     Ignored files and installed dependency contents are outside this file check.
     """
-    manifest_path = manifest_path.resolve(strict=True)
+    manifest_path = recorded_path(manifest_path, expected_spec.path_migrations).resolve(strict=True)
     directory = manifest_path.parent
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
@@ -281,15 +327,14 @@ def validate_baseline(manifest_path: Path, *, expected_spec: ExperimentSpec) -> 
     if (manifest.get("status") != "baseline_verified" or manifest.get("stage") != "complete"
             or manifest.get("baseline_files_unchanged") is not True):
         raise ValueError("Baseline preparation was not verified")
-    if Path(manifest["manifest"]).resolve() != manifest_path:
+    if recorded_path(manifest["manifest"], expected_spec.path_migrations) != manifest_path:
         raise ValueError("Manifest location differs from its recorded location")
     if (directory / "agent-run.json").exists():
         raise ValueError("This baseline already has an Agent run; create a fresh one with --prepare")
-    workspace = Path(manifest["workspace"]).resolve(strict=True)
+    workspace = recorded_path(manifest["workspace"], expected_spec.path_migrations).resolve(strict=True)
     source = expected_spec.source.resolve(strict=True)
     python = expected_spec.test_python.resolve(strict=True)
-    expected_environment = {k: v.replace("{run_dir}", str(directory))
-                            for k, v in expected_spec.environment.items()}
+    expected_environment = experiment_environment(expected_spec, directory, workspace)
     expected_fields = {
         "name": expected_spec.name, "source": str(source), "test_python": str(python),
         "regression_target": expected_spec.regression_target,
@@ -299,7 +344,13 @@ def validate_baseline(manifest_path: Path, *, expected_spec: ExperimentSpec) -> 
         "test_timeout": expected_spec.test_timeout, "test_environment": expected_environment,
     }
     for key, value in expected_fields.items():
-        if manifest.get(key) != value:
+        actual = manifest.get(key)
+        if key in ("source", "test_python"):
+            actual = str(recorded_path(actual, expected_spec.path_migrations))
+        elif key == "test_environment":
+            actual = recorded_environment(actual, expected_spec.path_migrations)
+            value = recorded_environment(value, expected_spec.path_migrations)
+        if actual != value:
             raise ValueError("Baseline configuration differs from this experiment: " + key)
     base = _git(source, "rev-parse", "--verify", expected_spec.revision + "^{commit}").decode().strip()
     if manifest["base_commit"] != base or _git(workspace, "rev-parse", "HEAD").decode().strip() != base:
@@ -312,8 +363,8 @@ def validate_baseline(manifest_path: Path, *, expected_spec: ExperimentSpec) -> 
         raise ValueError("Recorded test interpreter is missing")
     provenance = manifest["provenance"]
     if (not isinstance(provenance, dict)
-            or Path(provenance.get("python", "")).resolve() != python
-            or not Path(provenance.get("module_file", "")).resolve().is_relative_to(workspace)):
+            or recorded_path(provenance.get("python", ""), expected_spec.path_migrations) != python
+            or not recorded_path(provenance.get("module_file", ""), expected_spec.path_migrations).is_relative_to(workspace)):
         raise ValueError("Recorded import provenance does not match the baseline")
     artifacts = {"baseline-files.json": manifest["baseline_files_sha256"],
                  "g-plus-r.patch": manifest["g_plus_r_patch_sha256"]}
@@ -358,6 +409,7 @@ def validate_baseline(manifest_path: Path, *, expected_spec: ExperimentSpec) -> 
 
 def claim_baseline(manifest_path: Path, *, expected_spec: ExperimentSpec) -> dict:
     """Atomically claim one run; a second caller cannot reuse the same baseline."""
+    manifest_path = recorded_path(manifest_path, expected_spec.path_migrations).resolve(strict=True)
     manifest = validate_baseline(manifest_path, expected_spec=expected_spec)
     directory = manifest_path.resolve().parent
     receipt = {

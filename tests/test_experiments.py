@@ -49,7 +49,7 @@ class PrepareExperimentTest(unittest.TestCase):
 
     def remove_worktrees(self):
         # Only synthetic fixtures inside this test's TemporaryDirectory.
-        for workspace in (self.root / "workspaces").glob("calculator-*"):
+        for workspace in (self.root / "workspaces").glob("calculator*"):
             self.git("worktree", "remove", "--force", str(workspace))
 
     def prepare(self, spec=None):
@@ -242,6 +242,9 @@ class PrepareExperimentTest(unittest.TestCase):
         self.assertEqual(path.parent / "agent", Path(receipt["trace"]).parent)
         self.assertEqual("candidate_exported", receipt["artifacts"]["status"])
         self.assertFalse(receipt["artifacts"]["independently_verified"])
+        self.assertTrue(Path(receipt["agent_source"]["manifest"]).is_file())
+        self.assertEqual("captured", receipt["agent_source"]["status"])
+        self.assertTrue(Path(receipt["test_logs"]["directory"]).is_dir())
 
     def test_cli_exception_keeps_original_error_and_exports_partial_edit(self):
         baseline = self.prepare()
