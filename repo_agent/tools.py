@@ -46,7 +46,7 @@ class RepoTools:
     def __init__(self, root: Path, *, allow_writes: bool = False,
                  allow_tests: bool = False, test_timeout: int = 90,
                  test_python: Path | None = None, test_env: dict[str, str] | None = None,
-                 test_log_dir: Path | None = None):
+                 test_log_dir: Path | None = None, test_output_filter=None, test_junit: bool = False):
         self.root = root.expanduser().resolve(strict=True)
         if not self.root.is_dir():
             raise ValueError("Repository root must be a directory")
@@ -54,6 +54,8 @@ class RepoTools:
         self.allow_tests = allow_tests
         self.test_timeout = test_timeout
         self.test_env = dict(test_env or {})
+        self.test_output_filter = test_output_filter
+        self.test_junit = test_junit
         self.test_log_dir = test_log_dir.resolve() if test_log_dir is not None else None
         if self.test_log_dir is not None:
             if self.test_log_dir == self.root or self.test_log_dir.is_relative_to(self.root):
@@ -326,6 +328,8 @@ class RepoTools:
                              "PYTHONUTF8", "PYTHONIOENCODING", "PYTEST_DISABLE_PLUGIN_AUTOLOAD"}}}
             if log is not None:
                 directory = Path(log["directory"])
+                if self.test_junit:
+                    command.extend(["--junitxml=" + str(directory / "report.xml")])
                 try:
                     directory.mkdir(exist_ok=False)
                     self._save_test_metadata(directory, {**metadata, "id": log["id"], "status": "running"})
@@ -347,6 +351,9 @@ class RepoTools:
                 error = "pytest could not start: " + type(exc).__name__
             stdout = stdout.encode("utf-8") if isinstance(stdout, str) else (stdout or b"")
             stderr = stderr.encode("utf-8") if isinstance(stderr, str) else (stderr or b"")
+            if self.test_output_filter is not None:
+                stdout = self.test_output_filter(stdout)
+                stderr = self.test_output_filter(stderr)
             output = stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")
             answer = {"passed": code == 0 and error is None, "exit_code": code, "timed_out": timed_out,
                       "output": output[-6000:], "output_truncated": len(output) > 6000}

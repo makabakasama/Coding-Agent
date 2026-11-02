@@ -1,5 +1,30 @@
 # 实验目录
 
+## 2026-11-02 统一网页数据组织设计
+
+当前物理目录和已有迁移事实见下文；统一的项目→需求任务→多轮运行→独立验收模型、配置权威边界及拟议只读 API 统一维护在 [V0.3 数据模型](v0.3/data-model.md)，本节只补物理职责。**这是设计补充，本次未移动文件或切换实现。**
+
+目标继续复用已有 round_layout/ExperimentSpec/ExperimentRunner：round.json、allocate_round、allocate_verification 均已存在，不是待新造能力。后续新增目录保持：
+
+```text
+experiments/projects.json                    # 建议的唯一注册配置，尚未切换
+experiments/<project>/inputs/...             # source/env/requirements 等复用输入
+experiments/<project>/workspaces/...          # 每轮 Agent / 各次 verify 新副本
+runs/<taskKey>/task.json                      # 拟议需求身份及当前需求引用
+runs/<taskKey>/run_<ID>/round.json             # 已有轮次元数据机制
+runs/<taskKey>/run_<ID>/requirement-snapshot.json # 拟议新轮次的不可变需求配置快照
+runs/<taskKey>/run_<ID>/repair/...             # 准备、Agent、候选补丁和局部报告
+runs/<taskKey>/run_<ID>/verify-01/...           # 独立验收；重验追加 verify-02
+```
+
+既有 taskKey 保持 browser-use-5998、pydantic-ai-10525；prepare_<ID>/legacy_<ID> 的既有入口名继续保留。新模型尝试是新轮次，新验收是原轮次的新 verify；不把重复验收写成模型重跑。历史轮次没有新需求快照时显示缺失，不补写原文件。
+
+当前网页另有 `runs/tasks/projects.json`、`runs/tasks/task_<32位ID>/` 与 `experiments/tasks/`，尚未与上述实验体系统一。它们先原位只读兼容、保留旧链接；当前写入逻辑本次也不更改。目标不再另起 runs/tasks 体系，未来新写入切换与旧材料迁移另行确定，已有材料移动需单独授权并按显式映射核验。
+
+建议的项目注册配置与运行结果分离；Spec/Runner 仍是实验环境与 G/R 配置的权威，尤其 pydantic-ai 的解释器/PYTHONPATH 不能被普通任务环境白名单取代。首批网页只读接入两项目已有轮次和报告，不承诺启动新实验。
+
+## 已有材料布局
+
 现有材料与新实验统一按上游项目分类，再分初始材料和工作副本：
 
 ```text

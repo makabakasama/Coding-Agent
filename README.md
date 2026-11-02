@@ -6,6 +6,12 @@
 
 详细记录见 [2026-10-29 工程现状](docs/engineering-status-2026-10-29.md)。
 
+## V0.3 当前进展：M1 任务保存与查询
+
+已增加本地网页与 HTTP 接口，可选择配置项目、保存普通任务、固定准确起始 commit，并按随机编号查询；刷新或服务重启后可恢复记录。持久化使用 JSON 文件。此阶段仅保存约定，不创建任务工作副本或启动 Agent；执行和结果页面仍标注为演示。
+
+在根目录运行 `python -m repo_agent.task_http --port 4173`，打开 [本地工作台](http://127.0.0.1:4173)。新克隆需先配置本机项目列表；配置与任务记录均位于被忽略的 `runs/`。详见 [M1 运行说明](docs/v0.3/runbook.md)、[接口契约](docs/v0.3/task-api.md)和[本轮验收记录](docs/v0.3/m1-verification.md)。V0.3 的统一执行与结果交付尚未完成。
+
 ## 当前系统
 
 - **模型决策**：使用 OpenAI-compatible Chat Completions 原生 `tools` / `tool_calls`，校验工具名、参数和调用数量；不执行普通回复中的 JSON。

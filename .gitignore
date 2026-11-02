@@ -7,3 +7,5 @@ runs/
 .env.*
 !.env.example
 experiments/
+
+*.png
