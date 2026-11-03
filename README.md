@@ -1,4 +1,4 @@
-# Coding Agent MVP 0.2
+# Coding Agent — V0.3 本地任务工作台
 
 一个面向学习和工程验证的仓库修复 Agent：连接真实 LLM，在独立 Git 工作副本中观察代码、执行受限编辑、运行定向测试，并用新的工作副本验收保存的补丁。
 
@@ -6,11 +6,25 @@
 
 详细记录见 [2026-10-29 工程现状](docs/engineering-status-2026-10-29.md)。
 
-## V0.3 当前进展：M1 任务保存与查询
+V0.3 当前操作见 [工作台使用指南](docs/v0.3/workbench-guide.md)，完整进度和剩余项见 [阶段版本报告](docs/v0.3/version-report.md)。
 
-已增加本地网页与 HTTP 接口，可选择配置项目、保存普通任务、固定准确起始 commit，并按随机编号查询；刷新或服务重启后可恢复记录。持久化使用 JSON 文件。此阶段仅保存约定，不创建任务工作副本或启动 Agent；执行和结果页面仍标注为演示。
+2026-11-02 源码快照的完整回归及页面核对见 [验收记录](docs/v0.3/final-acceptance.md)；11 月 3 日恢复增量的相关检查见 [执行恢复](docs/v0.3/execution-recovery.md)。提交范围、已知限制和待验收项见 [V0.3 收尾清单](docs/v0.3/closeout.md)。当前处于提交前收尾，尚未发布。
 
-在根目录运行 `python -m repo_agent.task_http --port 4173`，打开 [本地工作台](http://127.0.0.1:4173)。新克隆需先配置本机项目列表；配置与任务记录均位于被忽略的 `runs/`。详见 [M1 运行说明](docs/v0.3/runbook.md)、[接口契约](docs/v0.3/task-api.md)和[本轮验收记录](docs/v0.3/m1-verification.md)。V0.3 的统一执行与结果交付尚未完成。
+命令行统一入口：`python -m repo_agent.task_cli`，通过本地服务管理网页中的同一份需求和轮次，见 [CLI 用法](docs/v0.3/task-cli.md)。原直接执行 CLI 保留兼容。
+
+## V0.3 当前进展：网页任务、Agent 执行与实验历史
+
+本地网页已支持普通任务保存、独立工作副本准备、显式启动 Agent、查看执行反馈、代码差异与固定最终检查。任务记录使用 JSON 文件持久化，可从“普通任务记录”重新打开。普通任务最终检查与范围审查不等于独立验收。
+
+browser-use #5998、pydantic-ai #10525 已接入项目、需求和历次运行浏览；需求页可单独确认启动新轮次，复用既有 Spec/Runner 的 G/R/P 和独立验收流程。用户启动的 pydantic-ai 轮次 `20261102-153009_fdeb5c70` 已有独立验收通过报告，5 个冻结目标均通过，见 [网页实验记录](docs/v0.3/experiment-start-verification.md)。这不代表两个网页实验均已完成真实验收。
+
+普通任务现支持阅读代码、修复 Bug 和补充小功能。阅读任务禁止编辑，通过 Agent 总结交付分析；另外两类在允许路径内编辑，结果分别展示修改、固定检查和总结。三类均使用相同的任务记录入口。
+
+达到步数上限后进入收尾，保留过程、修改和未完成项；常规落盘失败时尽量保存终止凭据，明确部分交付。遗留占用提供后端核实后的人工解除，保留旧记录，不自动重跑。恢复增量尚待用户选择时间加载，代码校验不替换运行中的服务。
+
+在根目录运行 `python -m repo_agent.task_http --port 4176 --workspace-root experiments/tasks`，打开 [本地工作台](http://127.0.0.1:4176)。启动服务不会调用模型；在页面确认执行会使用本机已配置的模型。新克隆需按 [运行说明](docs/v0.3/runbook.md)配置本机项目与环境，历史实验材料不会随 Git 克隆。详见 [V0.3 文档入口](docs/v0.3/README.md)、[实验接口](docs/v0.3/history-api.md)和[网页实验启动检查](docs/v0.3/experiment-start-verification.md)。
+
+工作台新建普通需求已采用“项目 → 需求 → 多轮运行”：记录写入 `runs/<taskKey>/run_<轮次ID>`，副本归入 `experiments/<project>/workspaces/`，与固定实验沿用相同目录层次。已有 `runs/tasks` 和 `experiments/tasks` 记录原位兼容，不自动迁移。详见 [普通需求与多轮运行](docs/v0.3/ordinary-rounds-api.md)。三类任务的真实演示与全版验收仍未全部完成。
 
 ## 当前系统
 

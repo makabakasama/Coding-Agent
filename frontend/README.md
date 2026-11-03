@@ -1,4 +1,6 @@
-# V0.3 / M1 + M2a + M3 前端
+# V0.3 工作台前端
+
+当前使用见 [工作台指南](../docs/v0.3/workbench-guide.md)，提交范围和剩余项见 [收尾清单](../docs/v0.3/closeout.md)。下文的 M1/M2a/M3 验证段落保留各批次证据，不表示当前源码再次全套通过。后续终止凭据及恢复增量的前端 41 项检查见 [执行恢复](../docs/v0.3/execution-recovery.md)。
 
 ## 运行
 
@@ -8,7 +10,7 @@
 python -m repo_agent.task_http --port 4176 --workspace-root experiments/tasks
 ```
 
-打开所选空闲端口（上例 http://127.0.0.1:4176 ）。服务默认使用 `runs/tasks/projects.json` 本机项目配置与 `runs/tasks` 任务目录。配置格式和校验规则见 [接口契约](../docs/v0.3/task-api.md)。未配置项目时页面禁用提交，不会借用演示项目。4173 为旧静态服务、4175 为旧 M1 服务，不停止或复用。旧进程不会加载新接口；M2a 须另选空闲端口启动当前版本。端口占用时换端口，不接管未知服务。
+打开所选空闲端口（上例 http://127.0.0.1:4176 ）。服务默认从 `runs/tasks/projects.json` 读取本机项目配置；新普通需求写入 `runs/<taskKey>/run_<ID>/`，副本归入 `experiments/<project>/workspaces/`，旧 `runs/tasks` 记录仍可读取。配置格式见 [接口契约](../docs/v0.3/task-api.md)。未配置普通项目时禁用普通任务提交，不以演示项目替代。旧进程不会热加载后端接口；由用户选择时机更新服务，开发检查使用独立数据和端口，不停止或替换用户已有服务。
 
 不再用 `python -m http.server` 运行真实保存流程：普通静态服务不提供 API。前端仍采用无第三方依赖的 HTML/CSS/JavaScript，服务仅需提供 index.html/styles.css/app.js。
 
@@ -149,9 +151,15 @@ node --test --test-name-pattern="real task list|real list" frontend/tests/task-u
 
 演示结果页顶部新增醒目真实任务入口，原底部演示入口明确改名“演示记录”。本轮语法检查通过，未新增测试矩阵。未创建任务、启动模型、重跑测试或改动真实记录；服务重启由后端完成，前端没有接管/停止进程。截图 task-list-4176.png 与 task-result-4176.png 位于本会话可视化目录。
 
+### 固定实验项目与新增轮次（2026-11-02）
+
+任务页分别列出普通任务项目与可启动的固定实验项目，browser-use 和 pydantic-ai 可直接进入各自需求。进入固定需求后，页面先 GET 运行状态；用户点“开始新一轮真实实验”、核对固定说明并再次点“确认启动”后，才 POST 空 JSON 到 `/runs`。成功后进入新的 `run_<ID>` 轮次，运行期间每 2.5 秒重读原报告，显示阶段、准备、Agent、P 导出及后续独立验收。
+
+本次新增页面行为检查通过，现有前端检查总计 32 项通过；未在检查中调用真实模型。
+
 ## 项目实验历史已接入（2026-11-02）
 
-新增 #projects 只读导航，沿用现有卡片和列表：项目 → 需求 → 轮次 → 各次 verify。普通任务 #tasks 与原 #/tasks/<ID> 保留，演示仍独立。所有历史路由仅GET，不提供实验启动/追加验收按钮；缺字段显示未记录，不从目录类型推断是否运行过模型，不将verify-02视为第二次模型运行。
+新增 #projects 导航，沿用现有卡片和列表：项目 → 需求 → 轮次 → 各次 verify。普通任务 #tasks 与原 #/tasks/<ID> 保留，演示仍独立。历史读取只用 GET；新增运行使用单独确认和 POST `/runs`，不提供追加验收按钮。缺字段显示未记录，不从目录类型推断是否运行过模型，不将 verify-02 视为第二次模型运行。
 
 已按 history-api.md 接入 round.artifacts、verify.reportRef 和受控文本分页；报告缺失/不可读与空内容分别展示。验收只在 verification_v1 + rawStatus=independently_verified + independentlyVerified=true 时标“报告记录独立验收通过（非本次重验）”；旧manifest不升级。未关联材料单独分区，taskKey=null保持未记录；读取哈希不代表已核验。普通表单排除canCreateTask=false的历史项目。普通任务契约当前不提供legacyLinks，保留原入口和链接，不自造映射。
 

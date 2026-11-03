@@ -75,8 +75,8 @@ def run_prepared(path: Path, *, spec: ExperimentSpec,
     return _runner().run_prepared(path, spec=spec, on_stage=on_stage)
 
 
-def run_experiment(spec: ExperimentSpec) -> dict:
-    return _runner().run_experiment(spec)
+def run_experiment(spec: ExperimentSpec, *, on_allocated=None) -> dict:
+    return _runner().run_experiment(spec, on_allocated=on_allocated)
 
 
 def main(argv: list[str] | None = None):

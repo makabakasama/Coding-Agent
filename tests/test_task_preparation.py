@@ -28,6 +28,25 @@ class PreparationTest(unittest.TestCase):
     def directory(self, task_id):
         return self.data / f"task_{task_id}" / "preparation"
 
+    def test_failed_git_diagnostics_are_saved_and_publicly_readable(self):
+        task_id = self.task()
+        with patch('repo_agent.task_preparation.create_worktree', side_effect=subprocess.CalledProcessError(
+                128, ['git', 'worktree', 'add', str(self.root / 'destination')], output='partial output', stderr='fatal: fixture failure')):
+            self.assertEqual('preparation_failed', self.service.prepare(task_id, {})['status'])
+        saved = json.loads((self.directory(task_id) / 'diagnostics.json').read_text())
+        self.assertEqual('create_worktree', saved['failure']['step'])
+        self.assertEqual(128, saved['failure']['exitCode'])
+        with serving(self.service) as port:
+            status, _, body = http(port, 'GET', f'/api/tasks/{task_id}/preparation/diagnostics')
+        self.assertEqual(200, status)
+        self.assertIn('fixture failure', body['details']['failure']['stderr'])
+        self.assertNotIn(str(self.root), json.dumps(body))
+        self.assertEqual('CalledProcessError', body['details']['failure']['errorType'])
+
+    def test_old_missing_diagnostics_do_not_invent_a_reason(self):
+        task_id = self.task()
+        self.assertEqual({'available': False, 'details': None, 'redacted': True}, self.service.preparation.diagnostics(task_id))
+
     def test_frozen_commit_repeat_restart_and_m1_unchanged(self):
         task_id = self.task()
         original = self.service.get(task_id)

@@ -49,6 +49,13 @@ def http(port, method, path, data=None, headers=None):
 
 
 class TaskContractTest(unittest.TestCase):
+    def test_three_task_kinds_and_read_only_scope(self):
+        for kind in ("fix_bug", "add_feature", "read_code"):
+            paths = [] if kind == "read_code" else ["calc.py"]
+            self.assertEqual(kind, validate_contract(request_contract(kind=kind, allowedPaths=paths))["kind"])
+        with self.assertRaises(TaskError):
+            validate_contract(request_contract(kind="read_code"))
+
     def test_normalization_and_defaults(self):
         contract = validate_contract(request_contract(current="  first\nsecond  ", allowedPaths=[" calc.py "]))
         self.assertEqual("first\nsecond", contract["current"])

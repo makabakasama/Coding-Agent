@@ -14,6 +14,9 @@ class TaskStore:
     def __init__(self, root: Path):
         self.root = root.resolve()
 
+    def directory(self, task_id):
+        return self.root / f"task_{task_id}"
+
     def create(self, build_record) -> dict:
         try:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -41,7 +44,7 @@ class TaskStore:
     def get(self, task_id: str) -> dict:
         if not TASK_ID.fullmatch(task_id):
             raise TaskError(400, "INVALID_TASK_ID", "任务编号格式不正确")
-        directory = self.root / f"task_{task_id}"
+        directory = self.directory(task_id)
         path = directory / "task.json"
         try:
             # resolve() catches junctions as well as ordinary symlinks on Windows.

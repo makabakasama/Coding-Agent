@@ -1,20 +1,40 @@
-# 首批只读实验历史接口
+# 实验历史与新增轮次接口
 
-日期：2026-11-02。已实现；实际4176读取证据见 [交付记录](history-verification.md)。基于 [数据模型](data-model.md)，只读现有两项目材料，所有新历史路由只允许 GET，不包含启动 POST。
+日期：2026-11-02。已实现；实际4176读取证据见 [交付记录](history-verification.md)。基于 [数据模型](data-model.md)，历史路由只读取现有材料；单独登记的新运行路由会调用真实 Provider。
 
 ## 项目与需求
 
-`GET /api/projects` 继续返回 `{projects:[...]}`。普通已配置项目增加 `modes:["ordinary"], historyAvailability:"not_applicable", canCreateTask:true, readOnly:false`；登记的历史项目为：
+`GET /api/projects` 继续返回 `{projects:[...]}`。普通已配置项目增加 `modes:["ordinary"], historyAvailability:"not_applicable", canCreateTask:true, canStartExperiment:false, readOnly:false`；登记的历史项目为：
 
 ```json
-{"projectId":"browser-use","name":"browser-use","modes":["experiment"],"historyAvailability":"available","canCreateTask":false,"readOnly":true}
+{"projectId":"browser-use","name":"browser-use","modes":["experiment"],"historyAvailability":"available","canCreateTask":false,"canStartExperiment":true,"readOnly":false}
 ```
 
-另一项目为 `pydantic-ai`。historyAvailability 为 available（历史根目录存在）或 missing；普通项目为 not_applicable。若本机也登记同ID普通项目，则合并 modes 并保留 canCreateTask=true，历史仍只读。普通任务表单只使用 canCreateTask 不为 false 的项目，不能因看见历史项目就提交创建。
+另一项目为 `pydantic-ai`。historyAvailability 为 available（历史根目录存在）或 missing；普通项目为 not_applicable。若本机也登记同 ID 普通项目，则合并 modes 并保留 canCreateTask=true。普通任务表单只使用 canCreateTask 不为 false 的项目；固定实验项目通过项目历史进入。
 
 任务详情另有 `legacyLinks`，统一为 `[{label,href}]`；本批两个实验任务都是空数组，因为未记录它们与某个32位普通任务的明确关联。普通任务列表/详情的现有入口保持不变，不猜造对应链接。
 
-`GET /api/projects/{projectId}/tasks` → `{tasks:[{projectId,taskKey,mode:"experiment",issueId,title,requirementRef:null,requirementRevision:null,roundCount,historyAvailability,readOnly:true}]}`。两个 taskKey 分别为 browser-use-5998 / pydantic-ai-10525，issueId 为 "5998" / "10525"。`GET /api/projects/{projectId}/tasks/{taskKey}` 返回同一任务对象。当前只接这两个显式登记需求；普通任务仍使用既有 /api/tasks 及原32位链接。
+`GET /api/projects/{projectId}/tasks` → `{tasks:[{projectId,taskKey,mode:"experiment",issueId,title,requirementRef:null,requirementRevision:null,roundCount,historyAvailability,canStartExperiment,readOnly}]}`。两个 taskKey 分别为 browser-use-5998 / pydantic-ai-10525，issueId 为 "5998" / "10525"。`GET /api/projects/{projectId}/tasks/{taskKey}` 返回同一任务对象。当前只接这两个显式登记需求；普通任务仍使用既有 /api/tasks 及原32位链接。
+
+## 新增一轮真实实验
+
+`POST /api/projects/{projectId}/tasks/{taskKey}/runs`，请求体必须为 `{}`。浏览器只提交已登记的项目和需求身份，不接受任意仓库、模型、解释器、环境、测试目标或命令。首次成功返回 **202**：
+
+```json
+{"projectId":"browser-use","taskKey":"browser-use-5998","roundId":"20261102-140000_1234abcd","status":"starting","startedAt":"UTC时间","finishedAt":null,"conclusion":null}
+```
+
+后端复用原有 `ExperimentRunner.run_experiment`：分配新的 `run_<ID>`，准备并验证 G+R，调用已配置 Provider，保存 Agent/P，再创建独立验收副本。返回 202 时只表示后台轮次已接受，不表示模型或验收成功。
+
+普通任务与实验共用同一个全局执行锁；任意一方运行时返回 **409 EXPERIMENT_BUSY**。登记源码、测试解释器或冻结补丁不可用时返回 **409 EXPERIMENT_CONFIG_UNAVAILABLE**；未登记身份返回 404 HISTORY_NOT_FOUND。没有取消、恢复或自动重试接口。
+
+`GET /api/projects/{projectId}/tasks/{taskKey}/runs/status` 只读当前进程保存的最近一次启动记录。仅当该记录属于请求的项目和需求时返回 `run`，其他项目的轮次不会作为本需求的查看链接；其他执行占用全局锁时仍禁止启动：
+
+```json
+{"run":{"projectId":"browser-use","taskKey":"browser-use-5998","roundId":"20261102-140000_1234abcd","status":"running","startedAt":"UTC时间","finishedAt":null,"conclusion":null},"active":true,"canStart":false,"startBlockReason":"EXPERIMENT_BUSY","liveness":"confirmed"}
+```
+
+run.status 为 starting/running/completed/failed/interrupted；conclusion 保留原总报告状态。服务重启后不把无运行痕迹的旧记录推断为存活，status 返回 `run:null, active:false, canStart:true, liveness:"not_assessed"`，历史轮次仍以落盘报告为准。页面轮询已有轮次详情；模型结束、P 导出和各次 verify 继续分开呈现。
 
 ## 轮次与验收
 

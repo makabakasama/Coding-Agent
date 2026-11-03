@@ -14,6 +14,8 @@ from .task_contract import TaskError, load_json
 from .task_projects import TaskProjects
 from .task_service import TaskService
 from .task_store import TaskStore
+from .project_task_store import ProjectTaskStore
+from .task_history import REGISTRY
 
 
 class TaskHandler(BaseHTTPRequestHandler):
@@ -82,8 +84,56 @@ class TaskHandler(BaseHTTPRequestHandler):
     def _dispatch(self):
         self._local_request()
         path = urlsplit(self.path).path
+        diagnostics = re.fullmatch(r"/api/tasks/([^/]+)/preparation/diagnostics", path)
+        if diagnostics:
+            if self.command != "GET":
+                raise TaskError(405, "METHOD_NOT_ALLOWED", "准备诊断仅支持读取")
+            self._json(200, self.service.preparation.diagnostics(diagnostics[1]))
+            return
+        organization = re.fullmatch(r"/api/tasks/([^/]+)/organization", path)
+        if organization:
+            if self.command != "GET":
+                raise TaskError(405, "METHOD_NOT_ALLOWED", "关联信息仅支持读取")
+            self._json(200, self.service.organization(organization[1]))
+            return
+        experiment_run = re.fullmatch(
+            r"/api/projects/([^/]+)/tasks/([^/]+)/runs(?:/(status))?", path
+        )
+        if experiment_run:
+            project, task, part = experiment_run.groups()
+            allowed = "POST" if part is None else "GET"
+            if self.command != allowed:
+                self._json(405, TaskError(405, "METHOD_NOT_ALLOWED", "实验启动接口方法不支持").response(),
+                           {"Allow": allowed})
+                return
+            if urlsplit(self.path).query:
+                raise TaskError(400, "OPEN_PAGE_ERROR", "实验启动接口不接受查询参数")
+            if part == "status":
+                self._json(200, self.service.experiments.status(project, task))
+            else:
+                status, body = self.service.experiments.start(project, task, self._body())
+                self._json(status, body)
+            return
         history = re.fullmatch(r"/api/projects/([^/]+)/tasks(?:/([^/]+)(?:/rounds(?:/([^/]+)(?:/(verifications|artifacts/([^/]+)))?)?)?)?", path)
         if history:
+            project, task, identifier, part, artifact_id = history.groups()
+            if project not in REGISTRY:
+                if urlsplit(self.path).query:
+                    raise TaskError(400, "INVALID_CURSOR", "普通需求接口不接受查询参数")
+                if self.command == "POST" and task is not None and path.endswith("/rounds"):
+                    self._json(201, self.service.new_round(project, task, self._body()))
+                elif self.command != "GET":
+                    raise TaskError(405, "METHOD_NOT_ALLOWED", "普通需求接口方法不支持")
+                elif task is None:
+                    self._json(200, self.service.ordinary_tasks(project))
+                elif identifier is None and path.endswith("/rounds"):
+                    self.service.ordinary_task(project, task)
+                    self._json(200, {"rounds": self.service.store.rounds(project, task)})
+                elif identifier is None:
+                    self._json(200, self.service.ordinary_task(project, task))
+                else:
+                    raise TaskError(404, "TASK_NOT_FOUND", "请通过轮次的运行编号访问结果")
+                return
             if self.command != "GET":
                 self._json(405, TaskError(405, "METHOD_NOT_ALLOWED", "实验历史仅支持读取").response(), {"Allow": "GET"})
                 return
@@ -108,10 +158,10 @@ class TaskHandler(BaseHTTPRequestHandler):
                     body = {"verifications": body["verifications"]}
             self._json(200, body)
             return
-        execution = re.fullmatch(r"/api/tasks/([^/]+)/execution(?:/(events|result|artifacts/([^/]+)))?", path)
+        execution = re.fullmatch(r"/api/tasks/([^/]+)/execution(?:/(events|result|diagnostics|recovery|artifacts/([^/]+)))?", path)
         if execution:
             task_id, part, identifier = execution.groups()
-            allowed = "GET, POST" if part is None else "GET"
+            allowed = "GET, POST" if part in (None, 'recovery') else "GET"
             if self.command not in allowed.split(", "):
                 self._json(405, TaskError(405, "METHOD_NOT_ALLOWED", "该接口不支持此方法").response(), {"Allow": allowed})
                 return
@@ -128,6 +178,10 @@ class TaskHandler(BaseHTTPRequestHandler):
                 status, body = 200, self.service.execution.events(task_id, int(query.get("after", ["0"])[0]), limit)
             elif part == "result":
                 status, body = 200, self.service.execution.result(task_id)
+            elif part == "diagnostics":
+                status, body = 200, self.service.execution.diagnostics(task_id)
+            elif part == 'recovery':
+                status, body = 200, self.service.execution.recovery(task_id, self._body() if self.command == 'POST' else None)
             else:
                 status, body = 200, self.service.execution.artifact(task_id, identifier, int(query.get("offset", ["0"])[0]), limit)
             self._json(status, body)
@@ -214,10 +268,13 @@ def main():
     parser.add_argument("--data-dir", type=Path, default=Path("runs/tasks"))
     parser.add_argument("--projects", type=Path, help="Local projects.json; defaults to DATA_DIR/projects.json")
     parser.add_argument("--workspace-root", type=Path, default=Path("experiments/tasks"))
+    parser.add_argument("--runs-root", type=Path, default=Path("runs"), help="Unified requirement/round records")
+    parser.add_argument("--project-workspaces", type=Path, default=Path("experiments"), help="Project workspaces; legacy workspace-root is retained")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("port must be 1..65535")
-    service = TaskService(TaskStore(args.data_dir), TaskProjects(args.projects or args.data_dir / "projects.json"), workspace_root=args.workspace_root)
+    service = TaskService(ProjectTaskStore(args.data_dir, args.runs_root, args.project_workspaces),
+                          TaskProjects(args.projects or args.data_dir / "projects.json"), workspace_root=args.workspace_root)
     try:
         server = create_server(service, port=args.port)
     except OSError:

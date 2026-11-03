@@ -25,7 +25,7 @@ def protected(path, targets):
 
 class TaskRepoTools(RepoTools):
     def __init__(self, root, *, contract, **kwargs):
-        super().__init__(root, allow_writes=True, allow_tests=contract["allowTests"], **kwargs)
+        super().__init__(root, allow_writes=contract["kind"] != "read_code", allow_tests=contract["allowTests"], **kwargs)
         self.contract = contract
         self.scopes = [(p, (self.root / p).is_dir()) for p in contract["allowedPaths"]]
 
@@ -47,7 +47,8 @@ class TaskRepoTools(RepoTools):
 
     def editable(self, path):
         self._path(path)
-        return (not protected(path, self.contract["checkTargets"])
+        return (self.contract["kind"] != "read_code"
+                and not protected(path, self.contract["checkTargets"])
                 and any(path == scope or directory and path.startswith(scope + "/") for scope, directory in self.scopes))
 
     def apply_patch(self, patch, *, expected_file=None):

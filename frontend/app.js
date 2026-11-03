@@ -10,7 +10,7 @@ const demo = {
 let draft = null;
 const badge = '<span class="badge demo">演示数据</span>';
 function heading(kicker, title, subtitle, extra = '') { return `<div class="title-row"><div><div class="eyebrow">${kicker}</div><h1>${title}</h1><p class="muted">${subtitle}</p></div>${extra}</div>`; }
-function contract(data) { return `<dl class="kv"><dt>项目</dt><dd>${escape(data.project)}</dd><dt>起始版本</dt><dd>${escape(data.revision)}</dd><dt>当前行为</dt><dd>${escape(data.current)}</dd><dt>期望行为</dt><dd>${escape(data.expected)}</dd><dt>允许修改</dt><dd>${escape(data.scope)}</dd><dt>测试权限</dt><dd>${data.allowTests ? '允许运行固定检查' : '不允许运行测试'}</dd><dt>检查目标</dt><dd>${escape(data.allowTests ? data.targets : '暂不检查')}</dd></dl>`; }
+function contract(data) { return `<dl class="kv"><dt>项目</dt><dd>${escape(data.project)}</dd><dt>代码起点</dt><dd>${escape(data.revision)}</dd><dt>任务说明</dt><dd>${escape(data.current)}</dd><dt>目标与交付</dt><dd>${escape(data.expected)}</dd><dt>允许修改</dt><dd>${escape(data.scope||'不允许修改文件')}</dd><dt>测试权限</dt><dd>${data.allowTests ? '允许运行固定检查' : '不允许运行测试'}</dd><dt>检查目标</dt><dd>${escape(data.allowTests ? data.targets : '暂不检查')}</dd></dl>`; }
 function history() { return `<section class="card"><div class="section-head"><h2>任务记录</h2><span class="badge">离线示例 · 3 条</span></div><p class="hint">以下均为虚构演示，不含真实历史运行。选择不同终止情况，审查相应结果。</p><table class="history"><thead><tr><th>任务</th><th>来源</th><th>终止原因</th><th>实际检查</th><th></th></tr></thead><tbody>${[['finished','DEMO-001','模型主动结束','通过 · 2 项'],['interrupted','DEMO-002','中断','未执行'],['failed','DEMO-003','准备失败','未执行']].map(([id,name,reason,check])=>`<tr><td>${name} · 空输入处理</td><td>演示数据</td><td>${reason}</td><td>${check}</td><td><a href="#result/${id}">审查结果 →</a></td></tr>`).join('')}</tbody></table></section>`; }
 function demoTask() {
  app.innerHTML = heading('DEMO CONTRACT', '演示任务表单', '约定目标、修改边界和检查方式，再进入独立副本。') + `<div class="grid"><form id="task-form"><section class="card"><div class="section-head"><h2>目标与起点</h2><span class="number">01 / 02</span></div><div class="two"><label>项目<select name="project"><option>示例 Python 项目</option></select><span class="hint">项目发现接口未接通，当前仅提供示例。</span></label><label>起始版本<input name="revision" required placeholder="填写准确 commit 或版本引用" maxlength="160"></label></div><label>当前行为<textarea name="current" required placeholder="什么输入或操作触发了什么问题？" maxlength="4000"></textarea></label><label>期望行为<textarea name="expected" required placeholder="修改后应该出现什么可观察的结果？" maxlength="4000"></textarea></label></section><section class="card"><div class="section-head"><h2>操作范围与检查</h2><span class="number">02 / 02</span></div><label>允许修改的文件 / 目录<textarea name="scope" required placeholder="每行一个仓库相对路径，例如 src/parser.py" maxlength="4000"></textarea></label><label class="check"><input type="checkbox" name="allowTests" checked>允许运行测试</label><label id="targets-label">固定检查目标<input name="targets" required placeholder="例如 tests/test_parser.py" maxlength="2000"><span class="hint">这里只约定目标，不会执行输入的命令。</span></label><p id="no-check" hidden class="hint">本次明确暂不检查；结果页需要保留“未执行”结论。</p></section><div class="actions"><button type="submit">预览任务约定 →</button><button type="button" class="secondary" id="fill-demo">填入演示需求</button></div></form><div><section class="card"><div class="eyebrow">WORKFLOW</div><h2 style="margin-top:16px">每一步都有可审查的产物</h2><p><strong>01　任务约定</strong><br><span class="muted">目标、起点、范围与检查目标</span></p><p><strong>02　独立副本与执行</strong><br><span class="muted">准备状态、工具记录与实际反馈</span></p><p><strong>03　结果交付</strong><br><span class="muted">修改、检查结果和未完成事项</span></p></section><div class="notice">真实启动尚未接通。预览与下载约定不会创建工作副本或调用模型。请勿在需求中填写密钥。</div><a class="button secondary" href="#execution">浏览执行页演示 →</a></div></div><div style="margin-top:30px">${history()}</div><dialog id="review" aria-label="任务约定核对"><div class="eyebrow">REVIEW CONTRACT</div><h2 style="margin-top:14px">提交前核对</h2><div id="review-content"></div><div class="notice">此约定仅保存在当前页面内存中。下载可留存；刷新后不保留。真实启动未接通。</div><div class="actions"><button id="download">下载任务约定</button><button disabled>准备副本并启动 · 未接通</button><button class="secondary" id="close-review">返回修改</button></div></dialog>`;
@@ -46,22 +46,35 @@ function validRecord(r) {
 }
 function task() {
  const epoch=pageEpoch;
- app.innerHTML=heading('TASK CONTRACT','保存一份明确的任务约定','M1 · 保存约定并固定起始版本，尚不准备副本或启动 Agent。')+`<div class="grid"><form id="real-task"><section class="card"><h2>目标与起点</h2><label>项目<select name="projectId" required disabled><option value="">正在加载项目…</option></select></label><p id="project-state" role="status">正在查询可用项目…</p><button type="button" class="secondary" id="reload-projects">重新加载项目</button><label>起始版本<input name="revision" required maxlength="160" placeholder="准确 commit 或版本引用，如 main"></label><label>当前行为<textarea name="current" required maxlength="4000"></textarea></label><label>期望行为<textarea name="expected" required maxlength="4000"></textarea></label></section><section class="card"><h2>操作范围与检查</h2><label>允许修改的文件 / 目录<textarea name="scope" required placeholder="每行一项，使用仓库相对路径及 / 分隔符"></textarea></label><label class="check"><input name="allowTests" type="checkbox">允许运行测试</label><label id="real-targets">固定检查目标<textarea name="targets" placeholder="每行一个 pytest 路径或 文件.py::测试节点"></textarea><span class="hint">填写目标，不填写 python / pytest 命令或选项。</span></label><p id="real-no-check" hidden>本次明确暂不检查。</p></section><div id="save-error" class="notice" role="alert" hidden style="white-space:pre-wrap"></div><div class="actions"><button id="preview-real" disabled>预览任务约定 →</button></div></form><div><section class="card"><h2>本轮保存什么</h2><p>保存目标、允许范围和检查约定，解析并固定准确 commit。源仓库未提交内容不进入本轮。</p><p class="muted">保存不代表已执行、检查通过或完成独立实验验收。步数预算默认为 12。</p><button disabled>准备副本并启动 · 尚未接通</button></section><div class="notice">请勿填写密钥。项目列表由本机配置提供；项目可选择不代表依赖已经准备好。</div><a href="#demo" class="button secondary">打开独立演示表单</a><p class="hint">演示流程不保存真实任务。</p><p><a class="button secondary" href="#tasks">真实任务记录 →</a></p><a href="#history">浏览演示记录 →</a></div></div><dialog id="real-review" aria-label="真实任务约定核对"><h2>确认并保存任务</h2><div id="real-review-content"></div><p>保存后按准确 commit 固定约定，不包含未提交内容。准确 commit 将在保存成功后展示；修改需求须新建任务。</p><div id="review-error" role="alert" style="white-space:pre-wrap"></div><div class="actions"><button id="save-real">确认保存（不启动）</button><button class="secondary" id="edit-real">返回修改</button></div></dialog>`;
+ app.innerHTML=heading('TASK CONTRACT','选择任务方式','普通任务可编辑约定；已有实验项目使用固定问题和验收流程。')+`<div class="grid"><form id="real-task"><section class="card"><h2>普通任务：目标与起点</h2><label>可创建任务的项目<select name="projectId" required disabled><option value="">正在加载项目…</option></select><span class="hint">固定实验项目显示在右侧，沿用已有 Spec 与独立验收。</span></label><p id="project-state" role="status">正在查询可用项目…</p><button type="button" class="secondary" id="reload-projects">重新加载项目</button><label>起始版本<input name="revision" required maxlength="160" placeholder="准确 commit 或版本引用，如 main"></label><label>当前行为<textarea name="current" required maxlength="4000"></textarea></label><label>期望行为<textarea name="expected" required maxlength="4000"></textarea></label></section><section class="card"><h2>操作范围与检查</h2><label>允许修改的文件 / 目录<textarea name="scope" required placeholder="每行一项，使用仓库相对路径及 / 分隔符"></textarea></label><label class="check"><input name="allowTests" type="checkbox">允许运行测试</label><label id="real-targets">固定检查目标<textarea name="targets" placeholder="每行一个 pytest 路径或 文件.py::测试节点"></textarea><span class="hint">填写目标，不填写 python / pytest 命令或选项。</span></label><p id="real-no-check" hidden>本次明确暂不检查。</p></section><div id="save-error" class="notice" role="alert" hidden style="white-space:pre-wrap"></div><div class="actions"><button id="preview-real" disabled>预览任务约定 →</button></div></form><div><section class="card"><h2>已有实验项目</h2><p class="hint">选择项目后进入固定需求和历史轮次，再明确确认是否启动新的真实模型实验。</p><div id="experiment-projects"><p>正在读取实验项目…</p></div></section><section class="card"><h2>普通任务保存什么</h2><p>保存目标、允许范围和检查约定，解析并固定准确 commit。源仓库未提交内容不进入本轮。</p><p class="muted">保存不代表已执行、检查通过或完成独立实验验收。步数预算默认为 12。</p></section><div class="notice">请勿填写密钥。实验项目不接受网页自定义检查命令，使用后端登记源码、环境和冻结 G/R。</div><a href="#demo" class="button secondary">打开独立演示表单</a><p class="hint">演示流程不保存真实任务。</p><p><a class="button secondary" href="#tasks">普通任务记录 →</a></p><a href="#projects" class="button secondary">全部项目实验 →</a></div></div><dialog id="real-review" aria-label="真实任务约定核对"><h2>确认并保存任务</h2><div id="real-review-content"></div><p>保存后按准确 commit 固定约定，不包含未提交内容。准确 commit 将在保存成功后展示；修改需求须新建任务。</p><div id="review-error" role="alert" style="white-space:pre-wrap"></div><div class="actions"><button id="save-real">确认保存（不启动）</button><button class="secondary" id="edit-real">返回修改</button></div></dialog>`;
  const form=document.querySelector('#real-task'), select=form.elements.projectId, preview=document.querySelector('#preview-real'), dialog=document.querySelector('#real-review'), save=document.querySelector('#save-real');
+ form.insertAdjacentHTML('afterbegin','<section class="card"><label>任务类型<select name="kind"><option value="fix_bug">修复 Bug</option><option value="read_code">阅读代码</option><option value="add_feature">补充小功能</option></select></label><p class="hint">阅读任务填写背景问题和期望分析，不修改文件；功能任务填写现状和新增行为。</p></section>');
+ form.elements.kind.value=realDraft.kind||'fix_bug';
  let projects=[], projectRequest=0, payload;
  const active=()=>pageEpoch===epoch;
  for(const name of ['revision','current','expected','scope','targets']) form.elements[name].value=realDraft[name];
  form.elements.allowTests.checked=realDraft.allowTests;
- function remember(){for(const name of ['projectId','revision','current','expected','scope','targets']) realDraft[name]=form.elements[name].value; realDraft.allowTests=form.elements.allowTests.checked;}
+ function remember(){for(const name of ['projectId','revision','current','expected','scope','targets','kind']) realDraft[name]=form.elements[name].value; realDraft.allowTests=form.elements.allowTests.checked;}
+ function toggleKind(){
+  const kind=form.elements.kind.value,reading=kind==='read_code';
+  const texts={read_code:['要弄清的问题','希望得到的分析','例如：任务提交后，代码如何创建并执行 Agent？','例如：按调用顺序解释，标出相关文件与函数。'],fix_bug:['缺陷表现与复现条件','修复后的预期行为','什么输入或操作触发了什么错误？','修复后应该出现什么结果？'],add_feature:['新增功能需求','验收条件','希望增加什么能力，使用场景是什么？','什么输入应产生什么输出，哪些行为需要保留？']}[kind];
+  for(const [index,name] of ['current','expected'].entries()){
+   const input=form.elements[name];input.closest('label').firstChild.textContent=texts[index];input.placeholder=texts[index+2];
+  }
+  const revision=form.elements.revision;revision.closest('label').firstChild.textContent='代码起点';revision.placeholder='默认 HEAD；也可填写分支或准确 commit';if(!revision.value)revision.value='HEAD';
+  form.elements.scope.disabled=reading;form.elements.scope.required=!reading;
+  form.elements.scope.closest('label').hidden=reading;
+ }
+ form.elements.kind.onchange=()=>{toggleKind();remember();};toggleKind();
  function toggle(){const enabled=form.elements.allowTests.checked; form.elements.targets.disabled=!enabled;form.elements.targets.required=enabled;document.querySelector('#real-targets').hidden=!enabled;document.querySelector('#real-no-check').hidden=enabled;}
  function buttons(){preview.disabled=!projects.length || pendingCreate || uncertainCreate;save.disabled=pendingCreate || uncertainCreate || !projects.length;document.querySelector('#edit-real').disabled=pendingCreate;save.textContent=pendingCreate?'正在保存…':'确认保存（不启动）';}
  function showError(message){document.querySelector('#save-error').hidden=false;document.querySelector('#save-error').textContent=message;document.querySelector('#review-error').textContent=message;}
  if(uncertainCreate)showError('保存结果暂无法确认，勿直接重复提交。后端可能已保存成功；本轮没有历史列表或幂等查询能力。请先由维护者核对记录。');
  if(pendingCreate)showError('上一保存请求仍在等待响应，请勿重复提交。');
  form.addEventListener('input',remember);form.addEventListener('change',remember);form.elements.allowTests.onchange=()=>{toggle();remember();};toggle();buttons();
- async function loadProjects(){const request=++projectRequest;projects=[];select.disabled=true;select.innerHTML='<option value="">正在加载项目…</option>';buttons();const state=document.querySelector('#project-state');state.textContent='正在查询可用项目…';try{const response=await fetch('/api/projects',{cache:'no-store'});const data=await response.json();if(!active()||request!==projectRequest)return;if(!response.ok)throw new Error(errorText(data));if(!Array.isArray(data.projects)||!data.projects.every(p=>typeof p.name==='string'&&/^[a-z0-9_-]{1,64}$/.test(p.projectId)))throw new Error('项目列表响应格式异常。');projects=data.projects.filter(p=>p.canCreateTask!==false);select.innerHTML=projects.length?'<option value="">请选择项目</option>'+projects.map(p=>`<option value="${escape(p.projectId)}">${escape(p.name)}</option>`).join(''):'<option value="">无可用项目</option>';select.disabled=!projects.length;if(projects.some(p=>p.projectId===realDraft.projectId))select.value=realDraft.projectId;state.textContent=projects.length?'已加载本机配置的项目。':'暂无可用项目，请先配置 runs/tasks/projects.json。';}catch(e){if(!active()||request!==projectRequest)return;select.innerHTML='<option value="">项目加载失败</option>';state.textContent=`项目不可用：${e.message || '后端连接失败'}`;}if(active()&&request===projectRequest)buttons();}
+ async function loadProjects(){const request=++projectRequest;projects=[];select.disabled=true;select.innerHTML='<option value="">正在加载项目…</option>';const experimentHost=document.querySelector('#experiment-projects');experimentHost.innerHTML='<p>正在读取实验项目…</p>';buttons();const state=document.querySelector('#project-state');state.textContent='正在查询可用项目…';try{const response=await fetch('/api/projects',{cache:'no-store'});const data=await response.json();if(!active()||request!==projectRequest)return;if(!response.ok)throw new Error(errorText(data));if(!Array.isArray(data.projects)||!data.projects.every(p=>typeof p.name==='string'&&/^[a-z0-9_-]{1,64}$/.test(p.projectId)))throw new Error('项目列表响应格式异常。');const experimentProjects=data.projects.filter(p=>p.canStartExperiment===true&&Array.isArray(p.modes)&&p.modes.includes('experiment'));experimentHost.innerHTML=experimentProjects.length?experimentProjects.map(p=>`<p><a href="#projects/${encodeURIComponent(p.projectId)}/tasks">${escape(p.name)} · 打开固定实验需求 →</a></p>`).join(''):'<p class="hint">没有可启动的固定实验项目。</p>';projects=data.projects.filter(p=>p.canCreateTask!==false);select.innerHTML=projects.length?'<option value="">请选择普通任务项目</option>'+projects.map(p=>`<option value="${escape(p.projectId)}">${escape(p.name)}</option>`).join(''):'<option value="">无可用普通任务项目</option>';select.disabled=!projects.length;if(projects.some(p=>p.projectId===realDraft.projectId))select.value=realDraft.projectId;state.textContent=projects.length?'已加载可创建普通任务的项目。':'暂无普通任务项目，可在右侧打开固定实验。';}catch(e){if(!active()||request!==projectRequest)return;experimentHost.innerHTML='<p role="alert">实验项目暂无法读取。</p>';select.innerHTML='<option value="">项目加载失败</option>';state.textContent=`项目不可用：${e.message || '后端连接失败'}`;}if(active()&&request===projectRequest)buttons();}
  document.querySelector('#reload-projects').onclick=loadProjects;
- form.onsubmit=e=>{e.preventDefault();if(!projects.length||pendingCreate||uncertainCreate)return;remember();if(!projects.some(p=>p.projectId===realDraft.projectId))return;const lines=value=>value.trim().split(/\r?\n/).map(s=>s.trim());payload={projectId:realDraft.projectId,revision:realDraft.revision.trim(),kind:'fix_bug',current:realDraft.current.trim(),expected:realDraft.expected.trim(),allowedPaths:lines(realDraft.scope),allowTests:realDraft.allowTests,checkTargets:realDraft.allowTests?lines(realDraft.targets):[],maxSteps:12};document.querySelector('#real-review-content').innerHTML=contract({project:projects.find(p=>p.projectId===payload.projectId).name,revision:payload.revision,current:payload.current,expected:payload.expected,scope:payload.allowedPaths.join('\n'),allowTests:payload.allowTests,targets:payload.checkTargets.join('\n')});document.querySelector('#review-error').textContent='';dialog.showModal();};
+ form.onsubmit=e=>{e.preventDefault();if(!projects.length||pendingCreate||uncertainCreate)return;remember();if(!projects.some(p=>p.projectId===realDraft.projectId))return;const lines=value=>value.trim().split(/\r?\n/).map(s=>s.trim());payload={projectId:realDraft.projectId,revision:realDraft.revision.trim(),kind:realDraft.kind,current:realDraft.current.trim(),expected:realDraft.expected.trim(),allowedPaths:realDraft.kind==='read_code'?[]:lines(realDraft.scope),allowTests:realDraft.allowTests,checkTargets:realDraft.allowTests?lines(realDraft.targets):[],maxSteps:12};document.querySelector('#real-review-content').innerHTML=`<p>任务类型：${({read_code:'阅读代码',fix_bug:'修复 Bug',add_feature:'补充小功能'})[payload.kind]}</p>`+contract({project:projects.find(p=>p.projectId===payload.projectId).name,revision:payload.revision,current:payload.current,expected:payload.expected,scope:payload.kind==='read_code'?'只读，不允许修改文件':payload.allowedPaths.join('\n'),allowTests:payload.allowTests,targets:payload.checkTargets.join('\n')});document.querySelector('#review-error').textContent='';dialog.showModal();};
  document.querySelector('#edit-real').onclick=()=>dialog.close();
  dialog.addEventListener('cancel',e=>{if(pendingCreate)e.preventDefault();});
  save.onclick=async()=>{if(pendingCreate||uncertainCreate||!payload)return;pendingCreate=true;buttons();let response;
@@ -91,6 +104,11 @@ function preparationPanel(taskRecord) {
   card.innerHTML=`<h2>${labels[status]||'准备状态暂无法确认'}</h2><p role="status" style="white-space:pre-wrap">${escape(message || ({not_prepared:'从已冻结 commit 单独准备副本；不包含源仓库未提交内容。',preparing:'后端报告正在准备工作副本；不是 Agent 执行中。请查询最新状态。',prepared:'副本准备记录已就绪；Agent 与检查状态见执行区域。',preparation_failed:'失败材料保留；本轮没有重试或清理接口。需要新一轮时请新建任务。'}[status]) || '请先查询最新状态，勿直接重复准备。')}</p>${r?`<dl class="kv"><dt>准备编号</dt><dd>${escape(r.preparationId||'未提供')}</dd><dt>副本标识</dt><dd>${escape(r.workspaceId||'未提供')}</dd><dt>固定 commit</dt><dd>${escape(r.baseCommit||taskRecord.contract.baseCommit)}</dd><dt>开始时间</dt><dd>${escape(date(r.startedAt))}</dd><dt>结束时间</dt><dd>${escape(date(r.finishedAt))}</dd></dl>`:''}${r?.error?`<p role="alert">${escape(r.error.message)}（${escape(r.error.code)}）</p>`:''}<p class="hint">worktree 仅隔离文件，不是执行沙箱。副本准备本身不安装依赖或验证 LFS/测试；实际检查见执行区域。准备接口不提供本机路径或日志下载入口。</p><div class="actions"><button id="prepare-workspace" ${status!=='not_prepared'||preparationPending.has(id)?'disabled':''}>${preparationPending.has(id)?'正在等待准备响应…':'准备工作副本'}</button><button class="secondary" id="query-preparation" ${preparationPending.has(id)?'disabled':''}>查询最新状态</button></div>`;
   document.querySelector('#prepare-workspace').onclick=()=>{if(status==='not_prepared'&&!preparationPending.has(id))update(true);};
   document.querySelector('#query-preparation').onclick=()=>update(false);
+  if(status==='preparation_failed'){
+   card.insertAdjacentHTML('beforeend','<details><summary>查看失败详情</summary><p id="preparation-diagnostics">正在读取已保存的诊断记录…</p></details>');
+   const host=document.querySelector('#preparation-diagnostics');
+   fetch(`/api/tasks/${id}/preparation/diagnostics`,{cache:'no-store'}).then(async response=>{const data=await response.json();if(!active()||!host)return;if(!response.ok)throw new Error(errorText(data));host.textContent=data.available?JSON.stringify(data.details,null,2):'本轮未保存详细诊断，无法从现有记录确定原因。';host.style.whiteSpace='pre-wrap';}).catch(e=>{if(active()&&host)host.textContent='诊断暂无法读取：'+e.message;});
+  }
  }
  async function update(write=false){
   const seq=++request;
@@ -134,10 +152,37 @@ function executionPanel(taskRecord) {
  const $=selector=>document.querySelector(selector);
  let state=null, timer=null, closed=false, querying=false, cursor=0, eventBusy=false, resultBusy=false, resultLoaded=false, artifacts=new Map();
  const active=()=>!closed && pageEpoch===epoch;
+ root.insertAdjacentHTML('beforeend','<details><summary>执行错误详情</summary><button class="secondary" id="query-execution-diagnostics">读取错误记录</button><pre id="execution-diagnostics">按需读取；没有记录不表示执行成功。</pre></details>');
+ $('#query-execution-diagnostics').onclick=async()=>{
+  const button=$('#query-execution-diagnostics'),host=$('#execution-diagnostics');button.disabled=true;
+  try{const response=await fetch(base+'/diagnostics',{cache:'no-store'}),data=await response.json();if(!active())return;if(!response.ok)throw new Error(errorText(data));host.textContent=data.available?JSON.stringify(data.errors,null,2):'本轮没有已保存的执行错误详情；无法补回旧异常，也不据此推断成功。';}
+  catch(e){if(active())host.textContent='错误详情暂无法读取：'+e.message;}
+  finally{if(active())button.disabled=false;}
+ };
+ root.insertAdjacentHTML('beforeend','<section class="card"><h3>异常恢复</h3><p>先核实旧执行和关联进程；解除只影响遗留占用，保留原记录，不重跑模型。</p><button class="secondary" id="query-execution-recovery">核实遗留占用</button><div id="execution-recovery-status" role="status"></div><button id="release-execution-owner" hidden disabled>解除遗留占用（保留记录）</button></section>');
+ let recovery=null;
+ const recoveryLabels={NO_STALE_OWNER:'没有需要解除的遗留占用',EXECUTION_ACTIVE:'有活动执行，不能解除',ASSOCIATED_PROCESS_ACTIVE:'仍有关联进程，不能解除',ACTIVITY_UNCONFIRMED:'进程状态无法核实，不能解除',RELEASED:'遗留占用已解除，原记录保留'};
+ function drawRecovery(data){
+  recovery=data;const owner=data.owner,button=$('#release-execution-owner');
+  $('#execution-recovery-status').innerHTML=`<p>${escape(recoveryLabels[data.reason]||data.reason||(data.canRelease?'后端已核实当前没有关联活动执行，可手动解除。':'未确认可解除'))}</p>${owner?`<p>旧执行：${escape(owner.executionId)}<br><a href="#/tasks/${escape(owner.taskId)}">查看旧执行及错误详情 →</a></p>`:''}${data.released?`<p>恢复记录：${escape(data.released.releasedAt)}</p>`:''}`;
+  button.hidden=!data.canRelease;button.disabled=!data.canRelease;
+ }
+ $('#query-execution-recovery').onclick=async()=>{
+  const button=$('#query-execution-recovery');button.disabled=true;$('#release-execution-owner').disabled=true;
+  try{const response=await fetch(base+'/recovery',{cache:'no-store'}),data=await response.json();if(!active())return;if(!response.ok)throw new Error(errorText(data));drawRecovery(data);}
+  catch(e){if(active()){$('#execution-recovery-status').textContent='恢复检查失败：'+e.message;recovery=null;}}
+  finally{if(active())button.disabled=false;}
+ };
+ $('#release-execution-owner').onclick=async()=>{
+  if(!active()||!recovery?.canRelease||!recovery.owner)return;
+  const owner=recovery.owner;recovery=null;$('#release-execution-owner').disabled=true;
+  try{const response=await fetch(`/api/tasks/${owner.taskId}/execution/recovery`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({executionId:owner.executionId})}),data=await response.json();if(!active())return;if(!response.ok)throw new Error(errorText(data));drawRecovery(data);await refresh();}
+  catch(e){if(active())$('#execution-recovery-status').textContent='解除结果暂无法确认：'+e.message+'。请重新核实，不自动重发。';}
+ };
  executionCleanup=()=>{closed=true;if(timer!==null)clearTimeout(timer);};
  const text=(sel,value)=>{$(sel).textContent=value;};
  function buttons(){const busy=executionPending.has(id);$('#start-agent').disabled=!state?.canStart||state.status!=='not_started'||busy||querying;$('#query-execution').disabled=querying||busy;$('#query-result').disabled=resultBusy||!state||state.status==='not_started';}
- function validState(r){return r?.schemaVersion===1&&r.taskId===id&&['not_started','running','finalizing','terminated','unknown'].includes(r.status)&&typeof r.canStart==='boolean'&&['configured_provider','injected_test_model'].includes(r.source)&&r.isExecutionSandbox===false&&(r.status==='not_started'||/^[a-f0-9]{32}$/.test(r.executionId||''));}
+ function validState(r){return r?.schemaVersion===1&&r.taskId===id&&['not_started','running','finalizing','terminated','unknown'].includes(r.status)&&typeof r.canStart==='boolean'&&['configured_provider','injected_test_model'].includes(r.source)&&r.isExecutionSandbox===false&&(r.status==='not_started'||r.status==='unknown'&&r.executionId===undefined||/^[a-f0-9]{32}$/.test(r.executionId||''));}
  function draw(r,message=''){
   state=r;
   const labels={not_started:'尚未启动',running:'执行中',finalizing:'正在整理',terminated:'执行已终止',unknown:'状态暂无法确认'};
@@ -175,6 +220,7 @@ function executionPanel(taskRecord) {
    const reasons={agent_reported_finished:'模型主动结束',step_limit:'步数上限',agent_error:'Agent 出错',execution_error:'执行出错',policy_violation:'策略限制'};
    artifacts=new Map();
    $('#result-content').innerHTML=`<div class="metrics"><div class="metric">停止原因<strong>${escape(reasons[r.stopReason]||r.stopReason||'未提供')}</strong></div><div class="metric">固定最终检查<strong>${escape(checkLabel(r.finalChecks))}</strong></div><div class="metric">交付范围审查<strong>${checks[r.review.status]}</strong></div></div><p class="hint">检查仅覆盖冻结目标；检查退出码 0 不代替范围审查。未做独立 G/R/P 验收。</p><h3>修改与范围</h3><p>修改文件：${escape(r.review.changedPaths.join('、')||'无记录的修改')}</p><p>越界路径：${escape(r.review.outOfScopePaths.join('、')||'无记录')}</p><p>受保护变动：${escape(r.review.protectedChanges.join('、')||'无记录')}</p><h3>固定最终检查</h3><p>覆盖目标：${escape(r.finalChecks.targets.join('、')||'无')}</p><p>原因：${escape(r.finalChecks.reason||'未提供')}</p><p class="hint">${escape(countsText(r.finalChecks.counts))}</p>${r.finalChecks.checks.length?r.finalChecks.checks.map(c=>`<details open><summary>${escape(c.target)} · ${escape(checkLabel(c))}</summary><p>退出码：${escape(c.exitCode??'未提供')}；超时：${c.timedOut===true?'是':c.timedOut===false?'否':'未提供'}</p><p class="hint">${escape(countsText(c.counts))}；原因：${escape(c.reason||'未提供')}</p><p class="hint">stdout：${escape(c.stdoutArtifactId||'未提供')}；stderr：${escape(c.stderrArtifactId||'未提供')}。实际文本见下方登记材料。</p></details>`).join(''):'<p class="empty">无逐项检查记录，不补写通过结果。</p>'}<h3>未完成事项</h3><p style="white-space:pre-wrap">${escape(r.incomplete.join('\n')||'接口未列出未完成事项；不表示完整功能验收通过。')}</p><h3>本机补丁导出</h3><dl class="kv"><dt>状态</dt><dd>${escape(({saved:'已保存本机补丁',not_exported:'未导出',unavailable:'不可用'}[r.patchExport?.status])||'未提供')}</dd><dt>SHA256</dt><dd>${escape(r.patchExport?.sha256??'未提供')}</dd><dt>字节数</dt><dd>${escape(r.patchExport?.bytes??'未提供')}</dd><dt>原因</dt><dd>${escape(r.patchExport?.reason??'未提供')}</dd></dl><p class="hint">仅描述本机补丁留存，不提供原始补丁下载，不证明可重放或独立验收。</p><h3>Agent 总结（说明）</h3><p style="white-space:pre-wrap">${escape(r.agent?.summary||'未提供')}</p><p class="hint">Agent 状态：${escape(r.agent?.status||'未提供')}。总结不代替 diff、实际输出或范围审查。</p><h3>Diff 与完整公开记录</h3><p class="hint">以下是登记的受控材料，支持分页；脱敏/截断文本不能作为字节一致的补丁验收材料。原始记录仅留本机，当前没有私有 trace 下载。</p>${artifactWidgets(r)||'<p class="empty">未登记材料；不伪造 diff 或检查输出。</p>'}`;
+   if(r.delivery?.status==='partial')$('#result-content').insertAdjacentHTML('afterbegin','<p class="notice">部分交付：常规结果保存失败，当前显示终止凭据中的已保存内容。材料可能缺失，请查看执行错误详情。</p>');
    for(const [artifactId,a] of artifacts)$(`#artifact-load-${a.index}`).onclick=()=>readArtifact(artifactId);
    text('#result-message',`${sourceLabel(r.source)} · 已读取实际结果。`);resultLoaded=true;
   }catch(e){if(active()){text('#result-message',`结果暂不可用：${e.message}。不推断任务成功或失败。${resultLoaded?'下方保留上次读取的结果，尚未重新确认。':''}`);}}
@@ -205,6 +251,8 @@ async function taskDetail(id){
  function failed(message){app.innerHTML=heading('SAVED CONTRACT','任务读取失败','未将读取错误当作任务不存在。')+`<section class="card"><p role="alert" style="white-space:pre-wrap">${escape(message)}</p><a class="button" href="#task">返回新建任务</a></section>`;}
  if(!/^[a-f0-9]{32}$/.test(id)){failed('任务编号格式错误：需要完整 32 位小写十六进制编号。');return;}
  try{const response=await fetch(`/api/tasks/${id}`,{cache:'no-store'});const data=await response.json();if(epoch!==pageEpoch)return;if(!response.ok){failed(errorText(data));return;}if(!validRecord(data)||data.taskId!==id){failed('任务记录响应损坏或格式不符合约定，无法展示。');return;}const c=data.contract;const created=new Intl.DateTimeFormat('zh-CN',{dateStyle:'medium',timeStyle:'long',timeZone:'Asia/Shanghai'}).format(new Date(data.createdAt));app.innerHTML=heading('SAVED CONTRACT','任务工作台',data.taskId,'<span class="badge">真实保存 · 普通任务</span>')+`<div class="notice">任务约定已固定。准备、Agent 执行和最终检查分别查询；保存或准备成功不表示修复完成。</div><section class="card"><h2>固定版本与来源</h2><dl class="kv"><dt>任务编号</dt><dd>${escape(data.taskId)}</dd><dt>创建时间</dt><dd>${escape(created)}（北京时间）</dd><dt>准确 commit</dt><dd>${escape(c.baseCommit)}</dd><dt>起始引用</dt><dd>${escape(c.requestedRevision)}</dd><dt>步数上限</dt><dd>${c.maxSteps}</dd></dl><p class="hint">仅包含所选 commit，不包含源仓库未提交内容。保存约定不证明路径可写、检查存在或执行安全。</p></section><section class="card"><h2>已保存的任务约定</h2>${contract({project:c.projectId,revision:c.requestedRevision,current:c.current,expected:c.expected,scope:c.allowedPaths.join('\n'),allowTests:c.allowTests,targets:c.checkTargets.join('\n')})}</section><section class="card" id="preparation-card" aria-label="工作副本准备"></section><section class="card" id="execution-card" aria-label="Agent 执行与结果"></section><div class="actions"><a class="button secondary" href="#task">新建另一项任务</a><a class="button secondary" href="#tasks">返回真实任务记录</a></div><p class="hint">约定已固定；需求变化请新建任务。可收藏当前地址，刷新仅查询这份记录。</p>`; preparationPanel(data); executionPanel(data);
+ app.insertAdjacentHTML('afterbegin',`<p class="badge">任务类型：${escape(({read_code:'阅读代码 · 只读分析',fix_bug:'修复 Bug',add_feature:'补充小功能'})[c.kind]||c.kind)}</p>`);
+ ordinaryOrganization(id);
  }catch{if(epoch===pageEpoch)failed('后端不可用或响应无法读取，请确认本地服务正常后刷新。不会自动创建或重发任务。');}
 }
 
@@ -235,18 +283,70 @@ function verificationVerdict(v){return v.sourceFormat==='verification_v1'&&v.raw
 const historyValue = value => value===null||value===undefined||value===''?'未记录':typeof value==='object'?JSON.stringify(value):String(value);
 function historyFields(pairs){return `<dl class="kv">${pairs.map(([label,value])=>`<dt>${escape(label)}</dt><dd>${escape(historyValue(value))}</dd>`).join('')}</dl>`;}
 const historyHref = parts => '#projects/'+parts.map(encodeURIComponent).join('/');
+async function ordinaryOrganization(id){
+ const epoch=pageEpoch;
+ try{const response=await fetch(`/api/tasks/${id}/organization`,{cache:'no-store'}),info=await response.json();
+  if(pageEpoch!==epoch||!response.ok||info?.mode!=='ordinary'||!info.taskKey)return;
+  app.insertAdjacentHTML('afterbegin',`<p><a class="button secondary" href="${historyHref([info.projectId,'tasks',info.taskKey])}">返回所属需求与全部轮次 →</a> · ${escape(info.round_id)}</p>`);
+ }catch{}
+}
+function ordinaryRoundControl(taskPath,project,task){
+ const epoch=pageEpoch, button=document.querySelector('#new-ordinary-round');let busy=false;
+ button.onclick=async()=>{if(busy||epoch!==pageEpoch)return;busy=true;button.disabled=true;
+  document.querySelector('#ordinary-round-message').textContent='正在保存新轮次，不会启动模型…';
+  try{const response=await fetch(taskPath+'/rounds',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),record=await response.json();
+   if(epoch!==pageEpoch)return;
+   if(!response.ok){busy=false;button.disabled=false;throw new Error(errorText(record));}
+   if(response.status!==201||!validRecord(record)||record.contract.projectId!==project)throw new Error('保存响应无法确认');
+   location.hash='/tasks/'+record.taskId;
+  }catch(e){if(epoch===pageEpoch)document.querySelector('#ordinary-round-message').textContent=`${e.message}。请重新打开需求轮次列表核对，不自动重发。`;}
+ };
+}
+async function experimentStartControl(taskPath, projectId, taskKey) {
+ const epoch=pageEpoch, host=document.querySelector('#experiment-run-control');
+ const active=()=>pageEpoch===epoch;
+ let busy=false,state=null;
+ const labels={starting:'正在建立新轮次',running:'新轮次执行中',completed:'新轮次已完成',failed:'新轮次未通过',interrupted:'新轮次已中断'};
+ function draw(message=''){
+  const run=state?.run;
+  host.innerHTML=`<p id="experiment-run-message" role="status">${escape(message||(run?`${labels[run.status]||run.status}${run.roundId?' · '+run.roundId:''}`:'当前没有进行中的实验轮次。'))}</p>${state?.startBlockReason?`<p class="hint">启动暂不可用：${escape(state.startBlockReason)}</p>`:''}<dl class="kv"><dt>当前存活</dt><dd>${escape(state?.liveness||'未查询')}</dd><dt>最近轮次</dt><dd>${escape(run?.roundId||'无')}</dd><dt>最近结论</dt><dd>${escape(run?.conclusion||'未记录')}</dd></dl><div class="actions"><button id="start-experiment-run" ${!state?.canStart||busy?'disabled':''}>${busy?'正在启动…':'开始新一轮真实实验'}</button><button class="secondary" id="query-experiment-run" ${busy?'disabled':''}>查询运行状态</button>${run?.roundId?`<a class="button secondary" href="${historyHref([projectId,'tasks',taskKey,'rounds',run.roundId])}">查看最近轮次 →</a>`:''}</div>`;
+  document.querySelector('#query-experiment-run').onclick=load;
+  document.querySelector('#start-experiment-run').onclick=()=>{if(!state?.canStart||busy)return;document.querySelector('#experiment-start-review').showModal();};
+ }
+ async function load(){
+  if(!active()||busy)return;busy=true;let message='';draw('正在查询实验运行状态…');
+  try{const response=await fetch(`${taskPath}/runs/status`,{cache:'no-store'});const data=await response.json();if(!active())return;if(!response.ok)throw new Error(errorText(data));if(!data||typeof data.canStart!=='boolean'||typeof data.active!=='boolean'||!['confirmed','not_assessed'].includes(data.liveness)||data.run!==null&&(typeof data.run!=='object'||typeof data.run.status!=='string'))throw new Error('实验状态响应格式异常');state=data;}
+  catch(e){if(active()){state=null;message=`实验状态暂无法确认：${e.message}。不自动重发启动请求。`;}}
+  finally{busy=false;}
+  if(active())draw(message);
+ }
+ document.querySelector('#cancel-experiment-start').onclick=()=>document.querySelector('#experiment-start-review').close();
+ document.querySelector('#confirm-experiment-start').onclick=async()=>{
+  if(!active()||busy||!state?.canStart)return;busy=true;document.querySelector('#experiment-start-review').close();draw('已请求启动真实实验；正在等待轮次编号。');
+  try{const response=await fetch(`${taskPath}/runs`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const data=await response.json();if(!active())return;if(!response.ok)throw new Error(errorText(data));if(response.status!==202||data?.projectId!==projectId||data?.taskKey!==taskKey||!/^[0-9]{8}-[0-9]{6}_[a-f0-9]{8}$/.test(data.roundId||''))throw new Error('启动响应无法确认');location.hash=historyHref([projectId,'tasks',taskKey,'rounds',data.roundId]);}
+  catch(e){if(active()){busy=false;state=null;draw(`启动结果暂无法确认：${e.message}。请查询运行状态，勿直接重复启动。`);}}
+ };
+ await load();
+}
 async function projectHistory(parts=[]) {
  const epoch=pageEpoch, active=()=>pageEpoch===epoch;
- const shell=(title,body)=>{app.innerHTML=heading('PROJECT HISTORY',escape(title),'真实保存的历史材料 · 只读浏览，不启动模型、测试或验收。','<span class="badge">历史记录</span>')+`<div class="actions"><a class="button secondary" href="#projects">项目历史</a><a class="button secondary" href="#tasks">普通任务记录</a></div><div style="margin-top:20px">${body}</div>`;};
+ const shell=(title,body)=>{app.innerHTML=heading('PROJECT HISTORY',escape(title),'真实保存的实验材料；读取页面不会自动调用模型，新增运行必须单独确认。','<span class="badge">实验记录</span>')+`<div class="actions"><a class="button secondary" href="#projects">项目历史</a><a class="button secondary" href="#tasks">普通任务记录</a></div><div style="margin-top:20px">${body}</div>`;};
  shell('项目历史','<section class="card"><p role="status">正在读取历史记录…</p></section>');
  const get=async path=>{const response=await fetch(path,{cache:'no-store'});const data=await response.json();if(!response.ok)throw new Error(errorText(data));return data;};
  const table=(headers,rows)=>`<div class="table-scroll"><table class="history"><thead><tr>${headers.map(h=>`<th>${escape(h)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
  try{
-  if(!parts.length){const data=await get('/api/projects');if(!active())return;if(!Array.isArray(data.projects))throw new Error('项目列表格式异常');shell('项目历史',`<section class="card"><h2>选择项目</h2>${data.projects.length?table(['项目','历史可用性','入口'],data.projects.map(p=>`<tr><td>${escape(p.name)}<br><small>${escape(p.projectId)}</small></td><td>${escape(({available:'历史可读',missing:'历史根目录缺失',not_applicable:'普通任务'}[p.historyAvailability])||historyValue(p.historyAvailability))}</td><td>${p.historyAvailability==='not_applicable'?'<a href="#tasks">普通任务记录 →</a>':`<a href="${historyHref([p.projectId,'tasks'])}">查看需求 →</a>`}</td></tr>`)):'<p class="empty">没有已登记项目。</p>'}</section>`);return;}
+  if(!parts.length){const data=await get('/api/projects');if(!active())return;if(!Array.isArray(data.projects))throw new Error('项目列表格式异常');shell('项目与需求',`<section class="card"><h2>选择项目</h2>${data.projects.length?table(['项目','记录类型','入口'],data.projects.map(p=>`<tr><td>${escape(p.name)}<br><small>${escape(p.projectId)}</small></td><td>${escape(({available:'实验记录',missing:'历史根目录缺失',not_applicable:'普通需求'}[p.historyAvailability])||historyValue(p.historyAvailability))}</td><td><a href="${historyHref([p.projectId,'tasks'])}">查看需求 →</a></td></tr>`)):'<p class="empty">没有已登记项目。</p>'}</section>`);return;}
   const [projectId,taskSegment,taskKey,roundSegment,roundId,verifySegment,verifyId]=parts;
   if(taskSegment!=='tasks'||(roundSegment&&roundSegment!=='rounds')||(verifySegment&&verifySegment!=='verifications')||parts.length>7)throw new Error('历史页面地址无效');
   const taskBase=`/api/projects/${encodeURIComponent(projectId)}/tasks`,taskPath=taskKey?`${taskBase}/${encodeURIComponent(taskKey)}`:taskBase;
   if(!taskKey){const data=await get(taskBase);if(!active())return;if(!Array.isArray(data.tasks))throw new Error('需求列表格式异常');shell(`${projectId} · 需求`, `<section class="card">${data.tasks.length?table(['需求','模式','轮次','入口'],data.tasks.map(t=>`<tr><td>${escape(t.title||t.taskKey)}<br><small>${escape(t.issueId?'#'+t.issueId:'未记录 Issue')}</small></td><td>${escape(t.mode==='experiment'?'历史实验':t.mode==='ordinary'?'普通任务':historyValue(t.mode))}</td><td>${escape(historyValue(t.roundCount))}</td><td><a href="${historyHref([projectId,'tasks',t.taskKey])}">查看需求与轮次 →</a></td></tr>`)):'<p class="empty">当前项目没有已登记需求；普通任务也可从原任务记录入口查找。</p>'}</section>`);return;}
+  if(!roundId&&!['browser-use-5998','pydantic-ai-10525'].includes(taskKey)){
+   const [task,data]=await Promise.all([get(taskPath),get(taskPath+'/rounds')]);if(!active())return;
+   if(task.mode!=='ordinary'||!Array.isArray(data.rounds))throw new Error('普通需求格式异常');
+   const c=task.contract;
+   shell(task.title||taskKey,`<section class="card"><h2>普通需求</h2>${historyFields([['项目',projectId],['需求编号',taskKey],['任务类型',c.kind],['背景 / 当前行为',c.current],['期望分析 / 行为',c.expected],['原版本引用',c.requestedRevision],['允许修改',c.kind==='read_code'?'只读':c.allowedPaths.join('、')]])}<p>每轮重新解析原版本引用并冻结准确 commit；不修改旧快照。</p><button id="new-ordinary-round">准备新一轮（不启动模型）</button><p id="ordinary-round-message" role="status"></p></section><section class="card"><h2>全部运行轮次</h2>${table(['轮次','创建时间','固定版本','入口'],data.rounds.map(r=>`<tr><td>${escape(r.roundId)}</td><td>${escape(displayTime(r.createdAt))}</td><td>${escape(r.baseCommit)}</td><td><a href="#/tasks/${escape(r.runTaskId)}">查看执行与结果 →</a></td></tr>`))}</section>`);
+   ordinaryRoundControl(taskPath,projectId,taskKey);return 'ordinary';
+  }
   if(!roundId){const [task,roundData]=await Promise.all([get(taskPath),get(taskPath+'/rounds')]);if(!active())return;if(!Array.isArray(roundData.rounds))throw new Error('轮次列表格式异常');shell(task.title||taskKey,`<section class="card"><h2>需求身份</h2>${historyFields([['项目',projectId],['需求',taskKey],['模式',task.mode],['Issue',task.issueId],['需求引用',task.requirementRef],['需求版本',task.requirementRevision],['历史可用性',task.historyAvailability]])}<p class="hint">当前需求引用不是历史轮次快照，缺失版本不补造。</p><div id="legacy-history-links"></div></section><section class="card"><h2>多轮记录</h2><p class="hint">prepare 目录不代表从未运行模型；verify-02 是同轮追加验收，不是第二次模型运行。历史运行状态不用于推断当前存活。</p>${roundData.rounds.length?table(['轮次 / 来源','原总报告结论','Agent 停止状态','P 导出','独立验收次数','入口'],roundData.rounds.filter(r=>r.association!=='unlinked'&&r.taskKey!==null).map(r=>`<tr><td>${escape(r.roundId)}<br>${escape(historyValue(r.entry))} / ${escape(historyValue(r.sourceFormat))}<br>${escape(r.createdAt?displayTime(r.createdAt):'时间未记录')}</td><td>${escape(historyValue(r.originalRunConclusion))}</td><td>${escape(historyValue(r.agentStatus))}</td><td>${escape(historyValue(r.exportStatus))}</td><td>${escape(historyValue(r.verificationCount))}</td><td><a href="${historyHref([projectId,'tasks',taskKey,'rounds',r.roundId])}">查看轮次 →</a></td></tr>`)):'<p class="empty">没有可明确关联的轮次，不补造运行。</p>'}</section><section class="card"><h2>未关联材料</h2>${roundData.rounds.filter(r=>r.association==='unlinked'||r.taskKey===null).map(r=>`<p><a href="${historyHref([projectId,'tasks',taskKey,'rounds',r.roundId])}">${escape(r.roundId)} →</a> · ${escape(historyValue(r.sourceFormat))} · 不推断归属</p>`).join('')||'<p class="hint">没有返回未关联材料。</p>'}<p>${escape(Array.isArray(roundData.warnings)?roundData.warnings.join('；'):'')}</p></section>`);return;}
   const roundPath=`${taskPath}/rounds/${encodeURIComponent(roundId)}`;
   const [round,verifyData]=await Promise.all([get(roundPath),get(roundPath+'/verifications')]);if(!active())return;if(!Array.isArray(verifyData.verifications))throw new Error('独立验收列表格式异常');
@@ -255,11 +355,30 @@ async function projectHistory(parts=[]) {
  }catch(e){if(active())shell('历史读取失败',`<section class="card"><p role="alert">${escape(e.message)}。不将读取失败当作空历史，也不补写缺失证据。</p><a href="#projects">返回项目历史</a></section>`);}
 }
 
-function render() {
+async function render() {
  executionCleanup();
  pageEpoch++;
+ const epoch=pageEpoch;
  const hash=location.hash.slice(1);
- if(hash==='projects'||hash.startsWith('projects/')) { const parts=hash.split('/').slice(1).map(decodeURIComponent);document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#projects'));projectHistory(parts);document.querySelector('#breadcrumb').textContent='工作台 / 项目历史（只读）'; }
+ if(hash==='projects'||hash.startsWith('projects/')) {
+  const parts=hash.split('/').slice(1).map(decodeURIComponent);
+  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#projects'));
+  const mode=await projectHistory(parts);
+  if(pageEpoch===epoch&&mode!=='ordinary'&&parts.length===3&&parts[1]==='tasks'){
+   app.insertAdjacentHTML('beforeend',`<section class="card"><h2>运行控制</h2><div id="experiment-run-control"><p>正在查询实验运行状态…</p></div><dialog id="experiment-start-review" aria-label="启动真实实验确认"><h2>确认启动真实实验</h2><p><strong>${escape(parts[2])}</strong></p><p>本次会创建新的工作副本，调用已配置模型，随后导出候选补丁并在新副本中执行独立验收。</p><p class="notice">需求和检查目标由后端登记；网页不会提交自定义命令、环境或密钥。模型结束不等于独立验收通过。</p><div class="actions"><button id="confirm-experiment-start">确认启动</button><button class="secondary" id="cancel-experiment-start">取消</button></div></dialog></section>`);
+   await experimentStartControl(`/api/projects/${encodeURIComponent(parts[0])}/tasks/${encodeURIComponent(parts[2])}`,parts[0],parts[2]);
+  }else if(pageEpoch===epoch&&parts.length===5&&parts[1]==='tasks'&&parts[3]==='rounds'){
+   try{
+    const roundPath=`/api/projects/${encodeURIComponent(parts[0])}/tasks/${encodeURIComponent(parts[2])}/rounds/${encodeURIComponent(parts[4])}`;
+    const response=await fetch(roundPath,{cache:'no-store'}),round=await response.json();
+    if(pageEpoch===epoch&&response.ok){
+     app.insertAdjacentHTML('beforeend',`<section class="card"><h2>当前执行状态</h2><dl class="kv"><dt>阶段</dt><dd>${escape(round.stage||'未记录')}</dd><dt>原总报告</dt><dd>${escape(round.originalRunConclusion||'未记录')}</dd><dt>准备</dt><dd>${escape(round.preparationStatus||'未记录')}</dd><dt>Agent</dt><dd>${escape(round.agentStatus||'未记录')}</dd><dt>P 导出</dt><dd>${escape(round.exportStatus||'未记录')}</dd></dl><p class="hint">运行期间自动刷新；模型结束、补丁导出与独立验收分别判断。</p></section>`);
+     if(['running','preparing','starting_agent','selecting_verification','verifying'].includes(round.originalRunConclusion||round.stage))setTimeout(()=>{if(pageEpoch===epoch)render();},2500);
+    }
+   }catch{}
+  }
+  document.querySelector('#breadcrumb').textContent='工作台 / 项目历史';
+ }
  else if(hash.startsWith('/tasks/')) { taskDetail(hash.slice(7)); document.querySelector('#breadcrumb').textContent='工作台 / 已保存约定'; }
  else {
  const [route,variant]=hash.split('/'); const page=route||'task';

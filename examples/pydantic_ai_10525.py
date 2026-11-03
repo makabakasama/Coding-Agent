@@ -63,6 +63,10 @@ def _runner() -> ExperimentRunner:
         workspace_parent=PROJECT_ROOT / "experiments/pydantic-ai/workspaces")
 
 
+def run_experiment(spec: ExperimentSpec, *, on_allocated=None) -> dict:
+    return _runner().run_experiment(spec, on_allocated=on_allocated)
+
+
 def main(argv: list[str] | None = None):
     return _runner().main(argv, spec_factory=experiment_spec, description=__doc__)
 

@@ -1,5 +1,11 @@
 # M1 任务保存与查询接口契约
 
+## 2026-11-02 增量：三类普通任务
+
+`kind` 支持 `read_code`（阅读代码）、`fix_bug`（修复 Bug）、`add_feature`（补充小功能），省略仍默认为 `fix_bug`，复用原有保存、准备、执行与结果路由。
+
+阅读任务的 `current` 描述阅读背景或问题，`expected` 描述期望得到的分析；`allowedPaths` 必须为空数组，后端禁止编辑，结果使用 Agent 总结、读取步骤和范围审查呈现。修复与功能任务仍须至少一个允许修改路径。三类任务均可选择是否运行冻结检查；未运行测试不表示检查通过。Agent 总结是模型陈述，不是独立验收结论。
+
 ## 2026-11-02 增量：真实任务列表
 
 `GET /api/tasks` 返回 `200 {"tasks":[{"taskId":"完整32位ID","createdAt":"UTC时间","projectId":"项目编号","current":"当前行为正文","executionStatus":"not_started","resultAvailable":false}]}`。按 createdAt 最新优先，最多50项，无分页/搜索；原 POST 保存保持不变。

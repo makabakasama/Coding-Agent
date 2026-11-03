@@ -149,7 +149,8 @@ class ExperimentRunner:
         return result, exit_code
 
 
-    def run_experiment(self, spec: ExperimentSpec) -> dict:
+    def run_experiment(self, spec: ExperimentSpec, *,
+                       on_allocated: Callable[[Path, str], None] | None = None) -> dict:
         """One invocation, new G+R and independent P verification; retain every stage."""
         directory, identifier = allocate_round(self.project_root / "runs" / spec.name, "run", spec.name)
         path = directory / "experiment.json"
@@ -171,6 +172,8 @@ class ExperimentRunner:
                    agent_record=str(Path(baseline["manifest"]).parent / "agent-run.json"))
 
         update("preparing")
+        if on_allocated is not None:
+            on_allocated(directory, identifier)
         try:
             baseline = self.prepare(spec, workspace_parent=self._workspace_parent(),
                                           trace_parent=self.project_root / "runs", on_created=created,

@@ -78,6 +78,25 @@ class TaskPreparation:
             raise TaskError(503, "STORAGE_UNAVAILABLE", "准备记录位置不符合要求")
         return path
 
+    def _workspace_path(self, task, preparation_id):
+        info = self.store.round_info(task["taskId"]) if hasattr(self.store, "round_info") else None
+        if info is not None:
+            return (self.store.project_workspaces / task["contract"]["projectId"] / "workspaces"
+                    / f"{info['taskKey']}_{info['round_id']}_agent")
+        return (self.workspace_root / task["contract"]["projectId"] / "workspaces"
+                / f"task_{task['taskId']}_{preparation_id}_agent")
+
+    def diagnostics(self, task_id):
+        self.store.get(task_id)
+        path = self._path(self.store.directory(task_id) / "preparation/diagnostics.json")
+        try:
+            value = read_json(path)
+        except FileNotFoundError:
+            return {"available": False, "details": None, "redacted": True}
+        from .task_execution import Redactor
+        return {"available": True, "details": json.loads(Redactor().public(json.dumps(value, ensure_ascii=False))),
+                "redacted": True}
+
     def _read(self, directory, task_id):
         try:
             record = read_json(self._path(directory / "record.json"))
@@ -151,7 +170,7 @@ class TaskPreparation:
                                 r"^filter\..*\.(smudge|process|required)$"],
                                capture_output=True, text=True, encoding="utf-8", timeout=15)
         if probe.returncode not in (0, 1):
-            raise ValueError("Cannot inspect checkout filters")
+            raise subprocess.CalledProcessError(probe.returncode, probe.args, output=probe.stdout, stderr=probe.stderr)
         config = {"core.hooksPath": os.devnull, "submodule.recurse": "false"}
         for key in probe.stdout.splitlines():
             prefix = key.rsplit(".", 1)[0]
@@ -160,7 +179,7 @@ class TaskPreparation:
 
     def query(self, task_id, *, prepare=False):
         task = self.store.get(task_id)
-        directory = self._path(self.store.root / f"task_{task_id}" / "preparation")
+        directory = self._path(self.store.directory(task_id) / "preparation")
         lock = self._path(directory.parent / "preparation.lock")
         try:
             with exclusive(lock) as acquired:
@@ -174,7 +193,7 @@ class TaskPreparation:
                         try:
                             identity = read_json(self._path(directory / "identity.json"))
                             source, workspace = Path(identity["source"]), Path(identity["workspace"])
-                            expected = self.workspace_root / task["contract"]["projectId"] / "workspaces" / f"task_{task_id}_{record['preparationId']}_agent"
+                            expected = self._workspace_path(task, record['preparationId'])
                             if workspace != expected or self._identity(source, workspace) != identity or identity["head"] != task["contract"]["baseCommit"]:
                                 raise ValueError("Identity mismatch")
                         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
@@ -189,21 +208,46 @@ class TaskPreparation:
                           "startedAt": now(), "baseCommit": task["contract"]["baseCommit"],
                           "isExecutionSandbox": False}
                 write_json(directory / "record.json", record)
-                workspace = self.workspace_root / task["contract"]["projectId"] / "workspaces" / f"task_{task_id}_{preparation_id}_agent"
+                workspace = self._workspace_path(task, preparation_id)
+                diagnostic = {"steps": [], "failure": None}
+                def step(name):
+                    diagnostic["steps"].append({"step": name, "at": now()})
+                    write_json(directory / "diagnostics.json", diagnostic)
                 try:
+                    step("resolve_source")
                     source = self.projects.repository(task["contract"]["projectId"], record["baseCommit"])
+                    step("create_workspace_parent")
                     if workspace.resolve() != workspace:
                         raise ValueError("Workspace root redirected")
                     workspace.parent.mkdir(parents=True, exist_ok=True)
                     # Save intended paths before Git, including failed/partial creations.
                     write_json(directory / "identity.json", {"source": str(source), "workspace": str(workspace)})
+                    step("inspect_checkout_config")
+                    checkout_config = self._checkout_config(source)
+                    step("create_worktree")
                     create_worktree(source, workspace, record["baseCommit"],
-                                    git_config=self._checkout_config(source))
+                                    git_config=checkout_config)
+                    step("verify_workspace_identity")
                     identity = self._identity(source, workspace)
                     if identity["head"] != record["baseCommit"]:
                         raise ValueError("Wrong commit")
                     write_json(directory / "identity.json", identity)
-                except (OSError, ValueError, TaskError, subprocess.SubprocessError):
+                    step("prepared")
+                except (OSError, ValueError, TaskError, subprocess.SubprocessError) as exc:
+                    from .task_execution import Redactor
+                    redactor = Redactor()
+                    def text(value):
+                        if isinstance(value, bytes):
+                            value = value.decode("utf-8", errors="replace")
+                        return redactor.private(str(value or ""))
+                    failure = {"step": diagnostic["steps"][-1]["step"] if diagnostic["steps"] else "unknown",
+                               "errorType": type(exc).__name__, "message": text(exc),
+                               "command": [text(v) for v in exc.cmd] if isinstance(getattr(exc, "cmd", None), (list, tuple)) else text(getattr(exc, "cmd", None)),
+                               "exitCode": getattr(exc, "returncode", None),
+                               "stdout": text(getattr(exc, "stdout", None)), "stderr": text(getattr(exc, "stderr", None))}
+                    failure["truncated"] = any(isinstance(v, str) and len(v) > 32000 for v in failure.values())
+                    diagnostic["failure"] = {k: v[:32000] if isinstance(v, str) else v for k, v in failure.items()}
+                    write_json(directory / "diagnostics.json", diagnostic)
                     return self._fail(directory, record, "PREPARATION_FAILED", "工作副本准备失败，保留已有材料")
                 record = {**record, "status": "prepared", "finishedAt": now()}
                 write_json(directory / "record.json", record)

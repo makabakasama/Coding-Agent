@@ -1,6 +1,6 @@
 # 项目、需求、轮次与独立验收的数据模型
 
-日期：2026-11-02。**目标设计；首批只读历史接入已实施，其余统一写入/迁移目标未实施**。实际只读接口见 [history-api.md](history-api.md)，交付见 [读取验证](history-verification.md)。本文仍是统一数据模型目标方案；物理目录见 [实验目录](../experiment-layout.md)。最初设计轮只改文档，后续只读实施也没有移动或改写历史材料。
+日期：2026-11-02。**两个固定需求的新轮次启动及普通需求的新写入、多轮关系已实施；普通任务历史迁移及任意需求编辑尚未实施**。新普通任务采用统一目录，旧材料原位兼容。普通接口见 [ordinary-rounds-api.md](ordinary-rounds-api.md)，实验接口见 [history-api.md](history-api.md)。下文保留原设计过程，遇到首批只读或旧写入描述，以这两份当前增量契约为准。实施没有移动或改写历史材料。
 
 ## 1. 目标与现状
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | `round_layout.py` | round.json、allocate_round、allocate_verification、角色副本命名和摘要 | 直接复用轮次与验收分配，不重新发明 round.json |
 | `ExperimentSpec`、两个 examples 入口 | G、R、目标/控制测试、解释器、非敏感环境、可编辑文件及迁移映射 | experiment 模式的权威执行定义 |
-| `ExperimentRunner.run_experiment` | 新轮次准备、模型运行、导出、独立验收和总报告 | 后续网页实验启动复用此编排 |
+| `ExperimentRunner.run_experiment` | 新轮次准备、模型运行、导出、独立验收和总报告 | 网页两个登记需求已复用此编排 |
 | `ExperimentRunner.run_prepared` | 认领已准备 baseline，运行模型并导出 | 后续网页“从指定准备继续”复用；不是重复运行旧 baseline 的入口 |
 | `runs/<实验名>/{run,prepare,legacy}_<ID>` | 两项目已有历史轮次及 verify-* | 首批只读历史数据源 |
 | `task_store/task_service/task_execution`、`runs/tasks` | 网页普通任务保存、一次准备/执行、最近50条列表 | 已有普通任务兼容数据源，尚无任务下多轮模型 |
@@ -86,9 +86,9 @@
 
 结果视图分列 `originalRunConclusion`、`agentStatus`、`exportStatus`、`verifications[]`，不合成为会覆盖过去结论的一个成功布尔值。现代验收只有原报告 status 与 independently_verified 一致支持时才标“报告记录独立验收通过”；这不表示本次重新验收。哈希字段来自原报告，未重新核验时 integrityStatus=not_checked，不把读到哈希当作已检查内容完整。
 
-## 5. 拟议只读 API（尚未实现）
+## 5. 已实现的历史与固定实验运行 API
 
-现有 /api/projects 与 /api/tasks 属于已实现服务；下列项目内任务/轮次路由是首批只读接入建议，字段用 camelCase，ID 由后端登记或证据映射，浏览器不传本机路径。
+现有 /api/projects、/api/tasks 和下列项目内任务/轮次路由已实现；字段用 camelCase，ID 由后端登记或证据映射，浏览器不传本机路径。两个登记需求另有 POST `/runs` 和 GET `/runs/status`，复用原 ExperimentRunner；历史 GET 仍不触发 Runner。
 
 | 路由 | 最小响应字段 |
 | --- | --- |
@@ -100,7 +100,7 @@
 | GET /api/projects/{projectId}/tasks/{taskKey}/rounds/{roundId}/verifications | verifications: verificationId（如verify-02）, sourceFormat, createdAt/null, rawStatus/null, independentlyVerified/null, reportRef, candidateSha256/null, integrityStatus |
 | GET /api/projects/{projectId}/tasks/{taskKey}/rounds/{roundId}/artifacts/{artifactId} | 后端登记的报告/补丁/日志/摘要材料，kind、可用性、来源格式、脱敏/截断及分页标记；不存在/不可读不能返回伪造空成功 |
 
-材料只允许服务端登记 ID，不暴露任意文件路径或完整环境秘密；沿用当前材料文本展示、分页/脱敏原则。具体游标/错误码在首批实施时只补一份增量契约，不在此先造通用框架。首批不提供实验启动、重跑模型或追加验收 POST。
+材料只允许服务端登记 ID，不暴露任意文件路径或完整环境秘密；沿用当前材料文本展示、分页/脱敏原则。当前已追加两个登记需求的实验启动 POST，具体契约见 history-api.md；尚不提供从指定准备继续或追加验收 POST。
 
 ### 现有 /api/tasks 兼容
 
@@ -129,7 +129,7 @@
 4. 历史缺失、未关联或旧格式如实展示；旧网页真实任务及原收藏链接仍可读取。
 5. 页面读取不创建副本、不启动测试/模型、不重写摘要或历史 JSON，不迁移文件。只做必要的直接页面/API读取核对，不以大规模重跑实验作为接入前置。
 
-首批**不承诺网页能发起 #5998/#10525 新实验**。只读验收完成后，再单独把已登记 Spec/Runner 的启动、阶段与报告接入网页，复用 run_experiment/run_prepared/verify_experiment；不从普通任务执行器另造一条实验编排。
+首批只读阶段不包含启动能力；后续增量已接入 #5998/#10525 的 `run_experiment` 启动、阶段与报告，检查见 experiment-start-verification.md。pydantic-ai 网页新轮次已有用户运行并独立验收通过的报告；browser-use 新入口未在本批核对真实轮次。`run_prepared` 和追加 `verify_experiment` 尚未接入网页。
 
 ## 8. 待实施时确定的细节
 

@@ -1,12 +1,14 @@
 # 首批只读历史接入交付
 
-日期：2026-11-02。本批已实现，接口字段见 [history-api.md](history-api.md)。仅接入现有两项目历史，统一写入/配置迁移及网页实验启动仍未实施。
+日期：2026-11-02。历史读取及两个固定需求的新轮次启动已实现，接口见 [history-api.md](history-api.md)。通用写入统一、配置迁移和任意需求编辑仍未实施。
 
 ## 已实现与来源
 
 task_history.py 对已登记的 browser-use-5998、pydantic-ai-10525 读取 round.json、原 experiment/prepare/Agent/candidate 报告及 verify-* 报告。使用现有 Spec 工厂识别登记来源、round_layout 的 ID 格式和 recorded_path 解析已有迁移引用；不调用 Runner、prepare、verify、write_summary，不从当前 Spec 补造历史 G/R/需求快照。
 
 项目接口增加 modes/historyAvailability/canCreateTask/readOnly；原普通任务接口和写入逻辑保持。历史新路由全部 GET，旧格式验收不升级为现代独立通过。6条未关联材料保留 taskKey=null 和 warnings，不猜归属。报告/日志/补丁只按登记材料ID脱敏分页读取，没有任意路径读取。
+
+固定需求新增 POST `/runs` 和 GET `/runs/status`。POST 只接受 `{}`，复用原有 Spec/`ExperimentRunner.run_experiment`，产生新的 run ID、G/R、模型轨迹、P 导出和独立 verify。普通任务与实验共用全局执行锁。接口支持启动，真实模型运行仍由用户确认；本批开发没有发出真实启动 POST。
 
 ## 后端直接读取验证
 
@@ -34,4 +36,4 @@ task_history.py 对已登记的 browser-use-5998、pydantic-ai-10525 读取 roun
 - [pydantic-ai #10525](http://127.0.0.1:4176/#projects/pydantic-ai/tasks/pydantic-ai-10525)
 - [原普通任务记录](http://127.0.0.1:4176/#tasks)
 
-前端页面由前端会话维护；本后端完成接口与实际4176读取验证，没有自行进行浏览器验收。原报告中的独立验收通过只按原记录展示，integrityStatus=not_checked，本次没有重放P或重新验收。当前仍无网页新实验启动、配置迁移、全历史导入、未关联材料自动归属或统一多轮写入。没有提交或推送。
+新增启动路径的离线检查：后端 `tests/test_experiment_runs.py` 3项通过（空请求、重复启动锁、终态/状态 HTTP），前端现有32项行为检查通过，其中包括从任务页发现实验项目、单独确认后只 POST 一次空 JSON。未运行真实模型、目标实验或完整回归。原报告中的独立验收通过只按原记录展示，integrityStatus=not_checked，本次没有重放P或重新验收。配置迁移、全历史导入、未关联材料自动归属、取消/恢复及普通任务统一写入仍未完成。

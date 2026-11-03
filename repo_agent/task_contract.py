@@ -80,8 +80,8 @@ def validate_contract(value) -> dict:
             error(key, "版本引用格式不正确")
         result[key] = text
     result["kind"] = value.get("kind", "fix_bug")
-    if result["kind"] != "fix_bug":
-        error("kind", "当前仅支持 fix_bug")
+    if result["kind"] not in ("read_code", "fix_bug", "add_feature"):
+        error("kind", "须为 read_code、fix_bug 或 add_feature")
     result["maxSteps"] = value.get("maxSteps", 12)
     if type(result["maxSteps"]) is not int or not 1 <= result["maxSteps"] <= 50:
         error("maxSteps", "必须是 1–50 的整数")
@@ -109,7 +109,9 @@ def validate_contract(value) -> dict:
             if not valid or entry in result[key]:
                 error(key, "路径或检查目标无效，或出现重复项")
             result[key].append(entry)
-    if not result["allowedPaths"]:
+    if result["kind"] == "read_code" and result["allowedPaths"]:
+        error("allowedPaths", "阅读任务不允许修改，路径数组必须为空")
+    elif result["kind"] != "read_code" and not result["allowedPaths"]:
         error("allowedPaths", "至少指定一个允许修改路径")
     if result["allowTests"] is True and not result["checkTargets"]:
         error("checkTargets", "允许运行测试时必须指定检查目标")

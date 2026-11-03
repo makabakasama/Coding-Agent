@@ -31,15 +31,18 @@ class TaskHistory:
 
     def projects(self, configured):
         result = [{**p, "modes": ["ordinary"], "historyAvailability": "not_applicable",
-                   "canCreateTask": True, "readOnly": False} for p in configured]
+                   "canCreateTask": True, "canStartExperiment": False, "readOnly": False}
+                  for p in configured]
         for project, (task, _, _) in REGISTRY.items():
             item = next((p for p in result if p["projectId"] == project), None)
             history = "available" if (self.root / "runs" / task).is_dir() else "missing"
             if item:
-                item.update(modes=["ordinary", "experiment"], historyAvailability=history)
+                item.update(modes=["ordinary", "experiment"], historyAvailability=history,
+                            canStartExperiment=history == "available")
             else:
                 result.append({"projectId": project, "name": project, "modes": ["experiment"],
-                               "historyAvailability": history, "canCreateTask": False, "readOnly": True})
+                               "historyAvailability": history, "canCreateTask": False,
+                               "canStartExperiment": history == "available", "readOnly": history != "available"})
         return result
 
     def _safe(self, path, directory):
@@ -90,7 +93,8 @@ class TaskHistory:
         return {"projectId": project, "taskKey": task, "mode": "experiment", "issueId": registration[1],
                 "title": project + " #" + registration[1], "requirementRef": None, "requirementRevision": None,
                 "roundCount": len(records), "historyAvailability": "available" if parent.is_dir() else "missing",
-                "readOnly": True, "warnings": warnings, "legacyLinks": []}
+                "canStartExperiment": parent.is_dir(), "readOnly": not parent.is_dir(),
+                "warnings": warnings, "legacyLinks": []}
 
     def tasks(self, project):
         registration, _, _ = self._registration(project)
@@ -200,6 +204,7 @@ class TaskHistory:
         result = {"projectId": project, "taskKey": task if linked else None, "roundId": meta["round_id"], "entry": meta["entry"],
                   "mode": "experiment", "sourceFormat": "legacy_round" if meta["entry"] == "legacy" else "experiment_round",
                   "createdAt": total.get("started_at_utc", baseline.get("started_at_utc")),
+                  "stage": total.get("stage"),
                   "originalRunConclusion": total.get("status"), "preparationStatus": baseline.get("status"),
                   "agentStatus": agent.get("status"), "exportStatus": candidate.get("status"),
                   "verificationCount": len(verifications), "evidenceState": "unlinked" if not linked else "partial" if warnings else "available",

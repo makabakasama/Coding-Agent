@@ -83,3 +83,8 @@ review.status 为 passed、failed、unavailable。越界、测试/配置变动�
 本机 projects.json 向后兼容三字段项目，新增可选 `execution: {testPython, testEnv, testTimeout}`。testPython 相对配置目录解析，缺省为运行服务的 Python；testTimeout 整数 1–300，缺省 90。testEnv 仅允许 PYTHONHASHSEED、PYTHONUTF8、PYTHONIOENCODING、PYTEST_DISABLE_PLUGIN_AUTOLOAD 的非敏感字符串；测试额外固定禁用自动插件及外部缓存，拒绝 PYTHONPATH、密钥或任意环境注入。配置在启动时快照，运行期间不随配置变化。浏览器不接收配置内容。既有 .env 仅用于现有 Provider，不复制到副本或公共材料。
 
 实现不提供执行沙箱；本机可信项目的测试可能产生副作用或访问网络。最终审查能发现工作副本变动，但不是对任意代码的隔离保证。此批不改造 #5998/#10525 的准备/修复/独立验收入口。
+# 2026-11-03 执行错误诊断增量
+
+GET `/api/tasks/{id}/execution/diagnostics` 返回 `{available,errors:[],redacted:true}`，只读取本轮保存的错误，不启动或重试执行。每个错误包含 stage、at、errorType、message、traceback，以及 Git/子进程异常可用的 command、exitCode、stdout、stderr。文本有长度上限并标记 truncated，网页响应隐藏本机路径和已知密钥。日志写入 execution/diagnostics 独立文件，避免 result/state 写入失败时丢掉原异常；若诊断也无法落盘，向服务 stderr 输出脱敏错误。没有历史诊断的旧轮次返回 available=false，不补造原因。
+
+本批验证：执行专项首轮 13 passed / 1 failed（新诊断 JSON 在 traceback 脱敏后不可解析）；改为逐字段脱敏后，结果写入失败用例复核通过，补充 delivery state 写入失败后两项定向检查均通过。前端 38 passed，语法与 diff 检查通过。当前没有重新运行整个 193 项回归；该数量仍属于 2026-11-02 的源码快照。旧 dc3b7ee75bc2484dbc6b04d3ff68d168 轮次不补写诊断、不重试模型。

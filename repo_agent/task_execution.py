@@ -10,6 +10,8 @@ from pathlib import Path
 import re
 import subprocess
 import threading
+import traceback
+import sys
 import uuid
 
 from .agent import Agent
@@ -108,7 +110,23 @@ class TaskExecution:
         return path
 
     def _directory(self, task_id):
-        return self._path(self.store.root / f"task_{task_id}" / "execution")
+        return self._path(self.store.directory(task_id) / "execution")
+
+    def diagnostics(self, task_id):
+        self.store.get(task_id)
+        directory = self._path(self._directory(task_id) / "diagnostics")
+        with self._io():
+            errors = [read_json(self._path(path)) for path in sorted(directory.glob('*.json'))] if directory.exists() else []
+        redactor = Redactor()
+        def public(value):
+            if isinstance(value, str):
+                return redactor.public(value)
+            if isinstance(value, dict):
+                return {key: public(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [public(item) for item in value]
+            return value
+        return {"available": bool(errors), "errors": public(errors), "redacted": True}
 
     @contextmanager
     def _io(self):
@@ -126,7 +144,14 @@ class TaskExecution:
         if not directory.exists():
             return None
         try:
-            state = read_json(self._path(directory / "state.json"))
+            receipt = self._path(directory / "termination.json")
+            if receipt.exists():
+                terminal = read_json(receipt)
+                state = terminal["state"]
+                if state.get('status') != 'terminated' or terminal['result'].get('taskId') != task_id:
+                    raise ValueError('Invalid termination receipt')
+            else:
+                state = read_json(self._path(directory / "state.json"))
         except FileNotFoundError:
             return {"schemaVersion": 1, "taskId": task_id, "status": "unknown", "source": self.source,
                     "canStart": False, "startBlockReason": "ALREADY_STARTED", "isExecutionSandbox": False,
@@ -149,16 +174,72 @@ class TaskExecution:
         if (type(owner) is not dict or set(owner) != {"taskId", "executionId"}
                 or any(not isinstance(v, str) or not TASK_ID.fullmatch(v) for v in owner.values())):
             raise ValueError("Invalid execution owner")
+        released = self._path(self._directory(owner['taskId']) / 'recovery.json')
+        if released.exists() and read_json(released).get('owner') == owner:
+            return None
         state = self._read_state(owner["taskId"])
         if state is None or state.get("executionId") != owner["executionId"] or state["status"] != "terminated":
             return owner
         return None
 
+    def _active_processes(self, owner):
+        from .execution_activity import active_processes
+        directory = self._directory(owner['taskId'])
+        activity_path = self._path(directory / 'activity.json')
+        activity = read_json(activity_path) if activity_path.exists() else {}
+        paths = [directory]
+        identity_path = self._path(directory.parent / 'preparation/identity.json')
+        if identity_path.exists():
+            paths.append(read_json(identity_path)['workspace'])
+        else:
+            raise RuntimeError('Workspace identity unavailable for process inspection')
+        return active_processes(paths, activity.get('serverPid'))
+
+    def _recovery_check(self):
+        owner = self._owner()
+        if owner is None:
+            return {'owner': None, 'canRelease': False, 'reason': 'NO_STALE_OWNER', 'released': None}
+        if any(thread.is_alive() and thread.name == 'ordinary-task-' + owner['executionId'] for thread in self.threads):
+            return {'owner': owner, 'canRelease': False, 'reason': 'EXECUTION_ACTIVE', 'released': None}
+        try:
+            pids = self._active_processes(owner)
+        except Exception:
+            return {'owner': owner, 'canRelease': False, 'reason': 'ACTIVITY_UNCONFIRMED', 'released': None}
+        return {'owner': owner, 'canRelease': not pids,
+                'reason': 'ASSOCIATED_PROCESS_ACTIVE' if pids else None, 'released': None}
+
+    def recovery(self, task_id, value=None):
+        self.store.get(task_id)
+        if value is not None and (type(value) is not dict or set(value) != {'executionId'}
+                                  or not isinstance(value['executionId'], str) or not TASK_ID.fullmatch(value['executionId'])):
+            raise TaskError(400, 'VALIDATION_ERROR', '恢复请求必须指定旧 executionId')
+        with self._io():
+            with exclusive(self._path(self.store.root / 'execution-global.lock')) as acquired:
+                if not acquired:
+                    if value is not None:
+                        raise TaskError(409, 'EXECUTION_ACTIVE', '执行锁仍被占用，不能解除')
+                    return {'owner': self._owner(), 'canRelease': False, 'reason': 'EXECUTION_ACTIVE', 'released': None}
+                check = self._recovery_check()
+                if value is None:
+                    record = self._path(self._directory(task_id) / 'recovery.json')
+                    if record.exists():
+                        check['released'] = read_json(record)
+                    return check
+                expected = {'taskId': task_id, 'executionId': value['executionId']}
+                if check['owner'] != expected:
+                    raise TaskError(409, 'RECOVERY_OWNER_CHANGED', '旧执行占用已变化，请重新查询')
+                if not check['canRelease']:
+                    raise TaskError(409, check['reason'], '无法确认没有活动执行，未解除占用')
+                record = {'owner': expected, 'releasedAt': now(), 'processCheck': 'no_associated_processes',
+                          'previousState': self._read_state(task_id)}
+                write_json(self._path(self._directory(task_id) / 'recovery.json'), record)
+                return {'owner': expected, 'canRelease': False, 'reason': 'RELEASED', 'released': record}
+
     def _workspace(self, task):
         task_id = task["taskId"]
         if self.preparation.query(task_id)["status"] != "prepared":
             raise TaskError(409, "PREPARATION_REQUIRED", "工作副本尚未准备成功")
-        identity_path = self._path(self.store.root / f"task_{task_id}" / "preparation/identity.json")
+        identity_path = self._path(self.store.directory(task_id) / "preparation/identity.json")
         identity = read_json(identity_path)
         workspace, source = Path(identity["workspace"]), Path(identity["source"])
         if self.preparation._identity(source, workspace) != identity or identity["head"] != task["contract"]["baseCommit"]:
@@ -198,7 +279,8 @@ class TaskExecution:
                         if acquired or owner is None or owner["taskId"] != task_id:
                             state = {**state, "status": "unknown", "liveness": "unconfirmed", "activity": "unconfirmed"}
                     if state["status"] == "terminated":
-                        state = {**state, "resultAvailable": self._path(self._directory(task_id) / "result.json").is_file()}
+                        state = {**state, "resultAvailable": any(self._path(self._directory(task_id) / name).is_file()
+                                                                for name in ('result.json', 'termination.json'))}
                     return state
                 reason = "EXECUTION_BUSY" if not acquired else "EXECUTION_UNRESOLVED" if self._owner() else None
                 if reason is None:
@@ -236,6 +318,7 @@ class TaskExecution:
                          "maxSteps": task["contract"]["maxSteps"], "startedAt": stamp, "updatedAt": stamp,
                          "finishedAt": None, "liveness": "confirmed", "stopReason": None, "resultAvailable": False}
                 write_json(self._path(directory / "state.json"), state)
+                write_json(self._path(directory / 'activity.json'), {'serverPid': os.getpid()})
                 write_json(self._path(self.store.root / "execution-owner.json"), {"taskId": task_id, "executionId": execution_id})
                 thread = threading.Thread(target=self._worker, args=(task, state.copy(), context, lock), daemon=True,
                                           name="ordinary-task-" + execution_id)
@@ -301,10 +384,42 @@ class TaskExecution:
         stop = "execution_error"
         patch_export = {"status": "unavailable", "sha256": None, "bytes": None, "reason": "DIFF_UNAVAILABLE"}
         baseline, tools = None, None
+        delivery_step = "begin_delivery"
+        delivery_complete = False
+
+        def record_error(stage, exc):
+            def text(value):
+                if isinstance(value, bytes):
+                    value = value.decode('utf-8', errors='replace')
+                return redactor.private(str(value or ''))
+            command = getattr(exc, 'cmd', None)
+            value = {"stage": stage, "at": now(), "errorType": type(exc).__name__, "message": text(exc),
+                     "traceback": text(traceback.format_exc()), "command": [text(v) for v in command] if isinstance(command, (list, tuple)) else text(command),
+                     "exitCode": getattr(exc, 'returncode', None), "stdout": text(getattr(exc, 'stdout', None)),
+                     "stderr": text(getattr(exc, 'stderr', None))}
+            value['truncated'] = any(isinstance(v, str) and len(v) > 32000 for v in value.values())
+            value = {k: v[:32000] if isinstance(v, str) else v for k, v in value.items()}
+            try:
+                target = self._path(directory / 'diagnostics')
+                target.mkdir(exist_ok=True)
+                write_json(self._path(target / (uuid.uuid4().hex + '.json')), value)
+            except Exception:
+                print(redactor.public(json.dumps(value, ensure_ascii=False)), file=sys.stderr, flush=True)
 
         def save_state(**updates):
             state.update(updates, updatedAt=now())
             write_json(self._path(directory / "state.json"), state)
+
+        def public_result(partial=False):
+            agent = {'status': agent_result['status'], 'steps': agent_result.get('steps', 0),
+                     'summary': redactor.public(agent_result.get('answer', ''))}
+            if agent_result.get('reason'):
+                agent['error'] = redactor.public(agent_result['reason'])[:400]
+            return {'schemaVersion': 1, 'taskId': task['taskId'], 'executionId': state['executionId'],
+                    'source': self.source, 'stopReason': stop, 'agent': agent, 'finalChecks': checks,
+                    'review': review, 'artifacts': artifacts, 'patchExport': patch_export,
+                    'incomplete': incomplete, 'independentlyVerified': False,
+                    'delivery': {'status': 'partial' if partial else 'complete'}}
 
         def event(value):
             nonlocal sequence
@@ -351,7 +466,14 @@ class TaskExecution:
                        "runtime": model.get_run_metadata() if hasattr(model, "get_run_metadata") else {}})
             if getattr(model, "api_key", None):
                 redactor.secrets.add(model.api_key)
-            prompt = json.dumps(task["contract"], ensure_ascii=False) + "\nOnly edit allowedPaths business code. Never edit tests/configuration. Only run frozen checkTargets."
+            contract = task["contract"]
+            instructions = {
+                "read_code": "Read-only code investigation. current is the question to investigate; expected is the requested analysis. Do not implement a repair or edit any files. Finish with findings, relevant file paths and functions, evidence, and unanswered questions.",
+                "fix_bug": "Investigate and repair the reported defect. current describes the defect and reproduction conditions; expected describes correct behavior. Report the cause, minimal repair, actual checks and remaining work.",
+                "add_feature": "Implement the requested small feature. current is the new feature request, not a bug report; expected lists acceptance conditions. Preserve existing behavior and report the implementation, actual checks and unmet conditions.",
+            }
+            prompt = instructions[contract["kind"]] + "\nFrozen task contract:\n" + json.dumps(contract, ensure_ascii=False)
+            prompt += "\nOnly edit allowedPaths business code when the task permits editing. Never edit tests/configuration. Only run frozen checkTargets."
             agent = RecordedAgent(model, tools, trace_dir=directory / "trace", max_steps=state["maxSteps"],
                                   recorder=event, redactor=redactor)
             agent_result = agent.run(prompt)
@@ -404,6 +526,7 @@ class TaskExecution:
                 if checks["status"] != "passed":
                     incomplete.append("固定最终检查未全部通过")
         except Exception as exc:
+            record_error("execute_or_check", exc)
             stop = "execution_error"
             incomplete.append("执行异常，保留已产生材料；结果不代表修复通过")
             try:
@@ -422,13 +545,15 @@ class TaskExecution:
                 actual = [c for c in checks["checks"] if c["status"] != "not_run"]
                 if actual and all(c["counts"] is not None for c in actual):
                     checks["counts"] = {key: sum(c["counts"][key] for c in actual) for key in actual[0]["counts"]}
+                delivery_step = "save_delivery_state"
                 save_state(status="finalizing", phase="delivery", activity="saving_materials")
                 if baseline is not None and tools is not None:
                     try:
                         review = self._review(workspace, identity, baseline, tools)
                         if review["status"] != "passed":
                             stop = "policy_violation"
-                    except Exception:
+                    except Exception as exc:
+                        record_error("final_review", exc)
                         review["status"] = "unavailable"
                         incomplete.append("最终身份或范围审查不可用")
                 try:
@@ -461,30 +586,41 @@ class TaskExecution:
                         patch_export = {"status": "saved", "sha256": hashlib.sha256(patch).hexdigest(), "bytes": len(patch), "reason": None}
                     write_json(directory / "patch-export.json", patch_export)
                     artifact("diff", "diff", patch)
-                except Exception:
+                except Exception as exc:
+                    record_error("export_diff", exc)
                     incomplete.append("diff 未能完整保存")
                 if stop != "agent_reported_finished":
                     incomplete.append("Agent 未以正常 finish 完成，停止原因见 stopReason")
+                delivery_step = "save_delivery_events"
                 event({"type": "terminated"})
                 event_files = sorted((directory / "events").glob("*.json"))
                 artifact("events", "events", b"\n".join(p.read_bytes() for p in event_files))
-                public_agent = {"status": agent_result["status"], "steps": agent_result.get("steps", 0),
-                                "summary": redactor.public(agent_result.get("answer", ""))}
-                if agent_result.get("reason"):
-                    public_agent["error"] = redactor.public(agent_result["reason"])[:400]
-                result = {"schemaVersion": 1, "taskId": task["taskId"], "executionId": state["executionId"],
-                          "source": self.source, "stopReason": stop, "agent": public_agent,
-                          "finalChecks": checks, "review": review, "artifacts": artifacts,
-                          "patchExport": patch_export, "incomplete": incomplete, "independentlyVerified": False}
+                result = public_result()
+                delivery_step = "save_result"
                 write_json(self._path(directory / "result.json"), result)
+                delivery_step = "save_terminal_state"
                 save_state(status="terminated", phase="delivery", activity="stopped", liveness="stopped",
                            stopReason=stop, finishedAt=now(), resultAvailable=True)
-            except Exception:
+                delivery_complete = True
+            except Exception as exc:
                 # A partial claim remains permanently consumed; GET conservatively
                 # reports unknown after the OS lock is released. Never run again.
-                pass
+                record_error(delivery_step, exc)
             finally:
-                lock.__exit__(None, None, None)
+                try:
+                    if not delivery_complete:
+                        incomplete.append('常规交付落盘失败，保留终止凭据及已有材料；部分结果可能缺失，详见执行诊断')
+                        if stop == 'agent_reported_finished':
+                            stop = 'execution_error'
+                        final_state = {**state, 'status': 'terminated', 'phase': 'delivery', 'activity': 'stopped',
+                                       'liveness': 'stopped', 'finishedAt': now(), 'updatedAt': now(),
+                                       'stopReason': stop, 'resultAvailable': True}
+                        write_json(self._path(directory / 'termination.json'),
+                                   {'state': final_state, 'result': public_result(partial=True)})
+                except Exception as exc:
+                    record_error('save_termination_receipt', exc)
+                finally:
+                    lock.__exit__(None, None, None)
 
     def events(self, task_id, after=0, limit=50):
         self.store.get(task_id)
@@ -510,8 +646,12 @@ class TaskExecution:
         with self._io():
             path = self._path(self._directory(task_id) / "result.json")
             if not path.is_file():
-                raise TaskError(409, "RESULT_NOT_AVAILABLE", "完整结果尚未保存")
-            result = read_json(path)
+                receipt = self._path(self._directory(task_id) / 'termination.json')
+                if not receipt.is_file():
+                    raise TaskError(409, "RESULT_NOT_AVAILABLE", "完整结果尚未保存")
+                result = read_json(receipt)['result']
+            else:
+                result = read_json(path)
             if type(result) is not dict or result.get("taskId") != task_id or result.get("schemaVersion") != 1 or result.get("independentlyVerified") is not False:
                 raise ValueError("Invalid result")
             return result

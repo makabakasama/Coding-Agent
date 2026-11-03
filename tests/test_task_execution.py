@@ -56,6 +56,34 @@ class ExecutionTest(unittest.TestCase):
         identity = self.data / f"task_{task_id}/preparation/identity.json"
         return Path(json.loads(identity.read_text())["workspace"])
 
+    def test_read_code_preserves_source_and_delivers_analysis(self):
+        self.service = self.service_for(lambda: ScriptedModel([
+            Decision("read_file", {"path": "calc.py"}),
+            Decision("replace_text", {"path": "calc.py", "old_text": "return a - b", "new_text": "return a + b"}),
+            Decision("finish", {"answer": "calc.py:add subtracts its arguments; no files changed."}),
+        ]))
+        task_id = self.task(kind="read_code", allowedPaths=[], allowTests=False, checkTargets=[])
+        self.service.execution.start(task_id, {})
+        result = self.finish(task_id)
+        self.assertEqual([], result["review"]["changedPaths"])
+        self.assertEqual("passed", result["review"]["status"])
+        self.assertIn("subtracts", result["agent"]["summary"])
+        self.assertIn("return a - b", (self.workspace(task_id) / "calc.py").read_text())
+
+    def test_add_feature_delivers_new_behavior_in_existing_file(self):
+        self.service = self.service_for(lambda: ScriptedModel([
+            Decision("replace_text", {"path": "calc.py", "old_text": "return a - b", "new_text": "return a - b\n\ndef double(value):\n    return value * 2"}),
+            Decision("finish", {"answer": "Added double(value) in calc.py."}),
+        ]))
+        task_id = self.task(kind="add_feature", allowTests=False, checkTargets=[])
+        self.service.execution.start(task_id, {})
+        result = self.finish(task_id)
+        self.assertEqual("passed", result["review"]["status"])
+        self.assertEqual(["calc.py"], result["review"]["changedPaths"])
+        namespace = {}
+        exec((self.workspace(task_id) / "calc.py").read_text(), namespace)
+        self.assertEqual(8, namespace["double"](4))
+
     def test_full_repair_http_events_result_artifacts_restart_and_duplicate(self):
         class SnapshotRepairModel:
             step = 0
@@ -133,6 +161,10 @@ class ExecutionTest(unittest.TestCase):
         try:
             self.assertTrue(entered.wait(10))
             self.assertEqual("running", self.service.execution.get(task_id)["status"])
+            self.assertFalse(self.service.execution.recovery(task_id)['canRelease'])
+            with self.assertRaises(TaskError) as recovery_error:
+                self.service.execution.recovery(task_id, {'executionId': self.service.execution.get(task_id)['executionId']})
+            self.assertEqual('EXECUTION_ACTIVE', recovery_error.exception.code)
             restarted = self.service_for(BlockingModel)
             self.assertEqual(200, restarted.execution.start(task_id, {})[0])
             self.assertEqual("EXECUTION_BUSY", restarted.execution.get(other)["startBlockReason"])
@@ -177,6 +209,47 @@ class ExecutionTest(unittest.TestCase):
         self.assertEqual("EXECUTION_UNRESOLVED", self.service.execution.get(other)["startBlockReason"])
         with self.assertRaises(TaskError):
             self.service.execution.start(other, {})
+
+    def test_explicit_stale_recovery_checks_processes_and_preserves_old_claim(self):
+        task_id, other = self.task(), self.task()
+        directory = self.data / f'task_{task_id}/execution'
+        directory.mkdir()
+        owner = {'taskId': task_id, 'executionId': 'a' * 32}
+        (self.data / 'execution-owner.json').write_text(json.dumps(owner))
+        evidence = directory / 'retained.txt'
+        evidence.write_text('old failure remains')
+        with patch.object(self.service.execution, '_active_processes', return_value=[123]):
+            self.assertFalse(self.service.execution.recovery(task_id)['canRelease'])
+            with self.assertRaises(TaskError):
+                self.service.execution.recovery(task_id, {'executionId': owner['executionId']})
+        with patch.object(self.service.execution, '_active_processes', side_effect=RuntimeError('unavailable')):
+            self.assertEqual('ACTIVITY_UNCONFIRMED', self.service.execution.recovery(task_id)['reason'])
+        with patch.object(self.service.execution, '_active_processes', return_value=[]), serving(self.service) as port:
+            path = f'/api/tasks/{task_id}/execution/recovery'
+            self.assertTrue(http(port, 'GET', path)[2]['canRelease'])
+            self.assertEqual(409, http(port, 'POST', path, {'executionId': 'b' * 32})[0])
+            code, _, released = http(port, 'POST', path, {'executionId': owner['executionId']})
+            self.assertEqual(200, code)
+            self.assertEqual('RELEASED', released['reason'])
+        self.assertEqual('old failure remains', evidence.read_text())
+        self.assertTrue((directory / 'recovery.json').exists())
+        self.assertTrue(self.service.execution.get(other)['canStart'])
+        self.assertEqual(200, self.service.execution.start(task_id, {})[0])
+
+    def test_step_limit_keeps_patch_and_releases_execution_for_next_round(self):
+        self.service = self.service_for(lambda: ScriptedModel([
+            Decision('replace_text', {'path': 'calc.py', 'old_text': 'return a - b', 'new_text': 'return a + b'}),
+            Decision('read_file', {'path': 'calc.py'}),
+        ]))
+        task_id = self.task(maxSteps=2, allowTests=False, checkTargets=[])
+        other = self.task(allowTests=False, checkTargets=[])
+        self.service.execution.start(task_id, {})
+        result = self.finish(task_id)
+        self.assertEqual('step_limit', result['stopReason'])
+        self.assertEqual(['calc.py'], result['review']['changedPaths'])
+        self.assertTrue(result['incomplete'])
+        self.assertTrue((self.data / f'task_{task_id}/execution/candidate.patch').stat().st_size > 0)
+        self.assertTrue(self.service.execution.get(other)['canStart'])
 
     def test_tool_scope_and_frozen_targets_are_enforced(self):
         patch_text = "--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -1 +1 @@\n-from calc import add\n+pass\n"
@@ -287,6 +360,23 @@ class ExecutionTest(unittest.TestCase):
         self.assertIsNone(result["finalChecks"]["counts"])
         self.assertEqual("failed", result["finalChecks"]["status"])
 
+    def test_delivery_state_failure_is_diagnosed(self):
+        task_id = self.task(allowTests=False, checkTargets=[])
+        from repo_agent.task_execution import write_json
+        def failing_write(path, value):
+            if path.name == 'state.json' and value.get('phase') == 'delivery':
+                raise OSError('synthetic delivery state failure')
+            return write_json(path, value)
+        with patch('repo_agent.task_execution.write_json', side_effect=failing_write):
+            self.service.execution.start(task_id, {})
+            for thread in self.service.execution.threads:
+                thread.join(15)
+        diagnostic = self.service.execution.diagnostics(task_id)
+        self.assertEqual('terminated', self.service.execution.get(task_id)['status'])
+        self.assertEqual('partial', self.service.execution.result(task_id)['delivery']['status'])
+        self.assertEqual('save_delivery_state', diagnostic['errors'][0]['stage'])
+        self.assertIn('synthetic delivery state failure', diagnostic['errors'][0]['message'])
+
     def test_factory_exception_and_result_storage_failure_are_retained(self):
         def broken_factory():
             raise RuntimeError("factory fixture")
@@ -307,7 +397,16 @@ class ExecutionTest(unittest.TestCase):
             self.service.execution.start(second, {})
             for thread in self.service.execution.threads:
                 thread.join(15)
-        self.assertEqual("unknown", self.service.execution.get(second)["status"])
+        self.assertEqual("terminated", self.service.execution.get(second)["status"])
+        self.assertEqual('partial', self.service.execution.result(second)['delivery']['status'])
+        self.assertTrue(next(item for item in self.service.list() if item['taskId'] == second)['resultAvailable'])
+        with serving(self.service) as port:
+            code, _, diagnostic = http(port, 'GET', f'/api/tasks/{second}/execution/diagnostics')
+        self.assertEqual(200, code)
+        self.assertEqual('save_result', diagnostic['errors'][0]['stage'])
+        self.assertEqual('OSError', diagnostic['errors'][0]['errorType'])
+        self.assertIn('synthetic disk error', diagnostic['errors'][0]['message'])
+        self.assertNotIn(str(self.root), json.dumps(diagnostic))
         self.assertEqual(200, self.service.execution.start(second, {})[0])
         self.assertTrue((self.data / f"task_{second}/execution/events").exists())
 
