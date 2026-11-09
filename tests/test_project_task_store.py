@@ -2,10 +2,10 @@
 import json
 import unittest
 
-from repo_agent.project_task_store import ProjectTaskStore
-from repo_agent.task_service import TaskService
-from repo_agent.task_projects import TaskProjects
-from repo_agent.task_store import TaskStore
+from repo_agent.backend.repositories.project_task_store import ProjectTaskStore
+from repo_agent.backend.services.task_service import TaskService
+from repo_agent.backend.repositories.task_projects import TaskProjects
+from repo_agent.backend.repositories.task_store import TaskStore
 from tests import test_tasks as fixtures
 from tests.test_task_execution import ScriptedModel
 

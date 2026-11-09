@@ -115,3 +115,26 @@ experiments/<project>/workspaces/
 - API 调用、上下文和工具反馈的效率测量。
 - 更多 Issue、失败案例和多次运行评测，形成明确分母与可比较指标。
 - 依赖环境复建、跨机器补丁重放、上下文压缩与更精确的代码检索。
+
+
+## 代码结构
+
+普通任务启动现已通过 PostgreSQL 持久入队，由独立 Worker 执行。API 与 Worker 需分别启动，默认并发 3 轮，见 [Worker 池运行说明](docs/worker-pool.md)。
+
+后端入口为 `repo_agent/backend/app.py`，目录职责见 [后端结构](docs/backend-structure.md)。
+
+```text
+repo_agent/
+├── backend/
+│   ├── app.py           # 应用组装、配置与启动
+│   ├── routers/         # HTTP 路由、请求解析和响应
+│   ├── services/        # 任务创建、准备、执行等业务流程
+│   ├── repositories/    # PostgreSQL、JSON 和历史材料读写
+│   └── schemas/         # 任务契约、字段校验和错误结构
+├── core/                # Agent 循环、模型提供方、工具与工作副本
+├── experimentation/     # 修复实验准备、执行、补丁导出与独立验收
+├── infrastructure/      # 文件锁、JSON、脱敏、路径解析和源码证据
+└── cli/                 # 命令行客户端与历史导入
+```
+
+`python -m repo_agent.backend.app` 启动后端。原 `python -m repo_agent.task_http`、`repo_agent.task_cli` 和 `repo_agent.import_task_history` 命令保留为薄入口。

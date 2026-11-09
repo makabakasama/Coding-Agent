@@ -12,14 +12,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from repo_agent.agent import Agent
-from repo_agent.provider import OpenAICompatibleProvider
-from repo_agent.tools import RepoTools
-from repo_agent.experiments import ExperimentSpec, claim_baseline, prepare_experiment, validate_baseline
-from repo_agent.experiment_artifacts import export_run_artifacts
-from repo_agent.experiment_verify import verify_experiment
-from repo_agent.run_evidence import archive_agent_source, check_agent_source, source_archive_summary
-from repo_agent.experiment_runner import ExperimentRunner
+from repo_agent.core.agent import Agent
+from repo_agent.core.provider import OpenAICompatibleProvider
+from repo_agent.core.tools import RepoTools
+from repo_agent.experimentation.experiments import ExperimentSpec, claim_baseline, prepare_experiment, validate_baseline
+from repo_agent.experimentation.experiment_artifacts import export_run_artifacts
+from repo_agent.experimentation.experiment_verify import verify_experiment
+from repo_agent.infrastructure.run_evidence import archive_agent_source, check_agent_source, source_archive_summary
+from repo_agent.experimentation.experiment_runner import ExperimentRunner
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

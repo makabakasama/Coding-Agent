@@ -5,9 +5,9 @@ import subprocess
 import sys
 import tempfile
 
-from repo_agent.agent import Agent
-from repo_agent.decisions import Decision
-from repo_agent.tools import RepoTools
+from repo_agent.core.agent import Agent
+from repo_agent.core.decisions import Decision
+from repo_agent.core.tools import RepoTools
 
 
 class ScriptedModel:

@@ -11,9 +11,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from repo_agent.experiments import _files
-from repo_agent.path_migrations import recorded_path, validate_mappings
-from repo_agent.round_layout import BEIJING, initialize_round, new_round_id, workspace_name, write_summary
+from repo_agent.experimentation.experiments import _files
+from repo_agent.infrastructure.path_migrations import recorded_path, validate_mappings
+from repo_agent.infrastructure.round_layout import BEIJING, initialize_round, new_round_id, workspace_name, write_summary
 
 MAP = ROOT / "experiments/path-migrations.json"
 REPORT = ROOT / "runs/migrations" / ("rounds_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8])

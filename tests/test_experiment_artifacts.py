@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from repo_agent.experiments import _files, _sha
-from repo_agent.experiment_artifacts import export_run_artifacts
+from repo_agent.experimentation.experiments import _files, _sha
+from repo_agent.experimentation.experiment_artifacts import export_run_artifacts
 
 
 class ArtifactTest(unittest.TestCase):
@@ -127,7 +127,7 @@ class ArtifactTest(unittest.TestCase):
             if calls == 2:
                 (root / "calc.py").write_bytes(self.repaired + b"# concurrent edit\n")
             return _files(root)
-        with patch("repo_agent.experiment_artifacts._files", side_effect=files):
+        with patch("repo_agent.experimentation.experiment_artifacts._files", side_effect=files):
             report = self.export()
         self.assertEqual("integrity_violation", report["status"])
         self.assertFalse(report["integrity"]["snapshot_consistent"])

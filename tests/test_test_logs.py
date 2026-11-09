@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from repo_agent.tools import RepoTools
+from repo_agent.core.tools import RepoTools
 
 
 class TestLogTest(unittest.TestCase):
@@ -35,7 +35,7 @@ class TestLogTest(unittest.TestCase):
 
     def test_full_separate_streams_are_saved_while_model_output_stays_bounded(self):
         stdout, stderr = b"begin-stdout\n" + b"A" * 9000, b"pytest warning\n" + b"B" * 7000
-        with patch("repo_agent.tools.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout, stderr)):
+        with patch("repo_agent.core.tools.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout, stderr)):
             first = self.tools.run_tests("test_fixture.py")
             second = self.tools.run_tests("test_fixture.py")
         self.assertTrue(first["passed"])
@@ -52,13 +52,13 @@ class TestLogTest(unittest.TestCase):
         self.assertEqual([], list(self.repo.iterdir()))
 
     def test_failure_and_timeout_keep_output_and_actual_test_outcome(self):
-        with patch("repo_agent.tools.subprocess.run", return_value=subprocess.CompletedProcess([], 1, b"failed", b"details")):
+        with patch("repo_agent.core.tools.subprocess.run", return_value=subprocess.CompletedProcess([], 1, b"failed", b"details")):
             result = self.tools.run_tests("test_fixture.py")
         self.assertFalse(result["passed"])
         self.assertEqual(1, self.metadata(result)["exit_code"])
         for output in (b"partial bytes\xff", "partial 中文"):
             timeout = subprocess.TimeoutExpired(["pytest"], 1, output=output, stderr=output)
-            with self.subTest(output=type(output).__name__), patch("repo_agent.tools.subprocess.run", side_effect=timeout):
+            with self.subTest(output=type(output).__name__), patch("repo_agent.core.tools.subprocess.run", side_effect=timeout):
                 result = self.tools.run_tests("test_fixture.py")
             self.assertFalse(result["passed"])
             self.assertTrue(result["timed_out"])
@@ -70,7 +70,7 @@ class TestLogTest(unittest.TestCase):
 
     def test_log_initialization_failure_does_not_start_pytest(self):
         with patch.object(self.tools, "_save_test_metadata", side_effect=OSError("disk unavailable")), \
-                patch("repo_agent.tools.subprocess.run") as run:
+                patch("repo_agent.core.tools.subprocess.run") as run:
             result = self.tools.run_tests("test_fixture.py")
             run.assert_not_called()
         self.assertFalse(result["passed"])
@@ -86,7 +86,7 @@ class TestLogTest(unittest.TestCase):
                 raise OSError("disk unavailable")
             return save(*args)
         with patch.object(self.tools, "_save_test_metadata", side_effect=fail_second), \
-                patch("repo_agent.tools.subprocess.run", return_value=subprocess.CompletedProcess([], 0, b"passed", b"")):
+                patch("repo_agent.core.tools.subprocess.run", return_value=subprocess.CompletedProcess([], 0, b"passed", b"")):
             result = self.tools.run_tests("test_fixture.py")
         self.assertEqual(0, result["exit_code"])
         self.assertFalse(result["passed"])
@@ -108,7 +108,7 @@ class TestLogTest(unittest.TestCase):
 
     def test_optional_logging_and_log_path_boundary(self):
         plain = RepoTools(self.repo, allow_tests=True)
-        with patch("repo_agent.tools.subprocess.run", return_value=subprocess.CompletedProcess([], 0, b"ok", b"")):
+        with patch("repo_agent.core.tools.subprocess.run", return_value=subprocess.CompletedProcess([], 0, b"ok", b"")):
             result = plain.run_tests("test_fixture.py")
         self.assertNotIn("test_log", result)
         self.assertFalse(result["output_truncated"])

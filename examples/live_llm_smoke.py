@@ -7,9 +7,9 @@ from pathlib import Path
 import secrets
 import tempfile
 
-from repo_agent.agent import Agent
-from repo_agent.provider import OpenAICompatibleProvider, ProviderError
-from repo_agent.tools import RepoTools
+from repo_agent.core.agent import Agent
+from repo_agent.core.provider import OpenAICompatibleProvider, ProviderError
+from repo_agent.core.tools import RepoTools
 
 
 def run_smoke(model, trace_dir: Path) -> dict:

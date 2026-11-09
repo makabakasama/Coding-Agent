@@ -11,9 +11,9 @@ import unittest
 from unittest.mock import patch
 
 from examples import browser_use_5998 as entry
-from repo_agent.experiment_artifacts import export_run_artifacts
-from repo_agent.experiment_verify import verify_experiment
-from repo_agent.experiments import ExperimentSpec, _sha, claim_baseline, prepare_experiment
+from repo_agent.experimentation.experiment_artifacts import export_run_artifacts
+from repo_agent.experimentation.experiment_verify import verify_experiment
+from repo_agent.experimentation.experiments import ExperimentSpec, _sha, claim_baseline, prepare_experiment
 
 
 class VerifyExperimentTest(unittest.TestCase):

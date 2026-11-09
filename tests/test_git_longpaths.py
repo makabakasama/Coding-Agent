@@ -8,9 +8,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from repo_agent.experiments import ExperimentSpec, _files, _sha, prepare_experiment
+from repo_agent.experimentation.experiments import ExperimentSpec, _files, _sha, prepare_experiment
 
-from repo_agent.workspace import create_worktree
+from repo_agent.core.workspace import create_worktree
 
 
 class GitLongPathsTest(unittest.TestCase):
@@ -18,7 +18,7 @@ class GitLongPathsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for override, expected in (({}, "true"), ({"core.longpaths": "false"}, "false")):
-                with patch("repo_agent.workspace.subprocess.run", return_value=SimpleNamespace(stdout="commit")) as run:
+                with patch("repo_agent.core.workspace.subprocess.run", return_value=SimpleNamespace(stdout="commit")) as run:
                     create_worktree(root, root / "new", "HEAD", git_config=override)
                 for call in run.call_args_list:
                     self.assertIn("core.longpaths=" + expected, call.args[0])
@@ -76,10 +76,10 @@ class GitLongPathsTest(unittest.TestCase):
             roots += [Path("\\\\?\\" + str(Path.cwd())), Path("\\\\server\\share")]
         for root in roots:
             with self.subTest(root=str(root)), \
-                    patch("repo_agent.experiments._git", return_value=name.encode() + b"\0"), \
+                    patch("repo_agent.experimentation.experiments._git", return_value=name.encode() + b"\0"), \
                     patch.object(Path, "is_symlink", return_value=True), \
                     patch.object(Path, "is_file", side_effect=AssertionError("symlink must not be opened")), \
-                    patch("repo_agent.experiments.os.readlink", return_value="../target") as readlink:
+                    patch("repo_agent.experimentation.experiments.os.readlink", return_value="../target") as readlink:
                 self.assertEqual({name: {"symlink": "../target"}}, _files(root))
                 used = str(readlink.call_args.args[0])
                 if os.name == "nt":
@@ -101,9 +101,9 @@ class GitFailureEvidenceTest(unittest.TestCase):
                 regression_target="target", control_targets=("control",), failure_contains="target bug", import_module="calc")
             stderr = "diagnostic\n" * 1000 + "fatal: filename too long\n"
             failure = subprocess.CalledProcessError(128, ["git", "worktree", "add", "fixture"], output="full stdout\n", stderr=stderr)
-            with patch("repo_agent.experiments.create_worktree", side_effect=failure) as create, \
-                    patch("repo_agent.experiments._run_import_probe") as probe, \
-                    patch("repo_agent.experiments._run_test") as tests:
+            with patch("repo_agent.experimentation.experiments.create_worktree", side_effect=failure) as create, \
+                    patch("repo_agent.experimentation.experiments._run_import_probe") as probe, \
+                    patch("repo_agent.experimentation.experiments._run_test") as tests:
                 first = prepare_experiment(spec, workspace_parent=root / "workspaces", trace_parent=root / "runs")
                 original = Path(first["manifest"]).read_bytes()
                 second = prepare_experiment(spec, workspace_parent=root / "workspaces", trace_parent=root / "runs")
@@ -130,7 +130,7 @@ class GitFailureEvidenceTest(unittest.TestCase):
             spec = ExperimentSpec(name="fixture", source=root, revision="HEAD", test_python=Path(sys.executable),
                 regression_target="target", control_targets=("control",), failure_contains="bug", import_module="calc")
             failure = subprocess.TimeoutExpired(["git", "worktree", "add"], 120, output=b"partial\xff", stderr=b"timeout details")
-            with patch("repo_agent.experiments.create_worktree", side_effect=failure), patch("repo_agent.experiments._run_test") as tests:
+            with patch("repo_agent.experimentation.experiments.create_worktree", side_effect=failure), patch("repo_agent.experimentation.experiments._run_test") as tests:
                 result = prepare_experiment(spec, workspace_parent=root / "workspaces", trace_parent=root / "runs")
                 tests.assert_not_called()
             evidence = result["git_failure"]

@@ -10,9 +10,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from repo_agent.agent import Agent
-from repo_agent.decisions import Decision
-from repo_agent.tools import RepoTools
+from repo_agent.core.agent import Agent
+from repo_agent.core.decisions import Decision
+from repo_agent.core.tools import RepoTools
 
 
 class SnapshotTest(unittest.TestCase):
@@ -121,7 +121,7 @@ class SnapshotTest(unittest.TestCase):
             yield from real_diff(*args, **kwargs)
             self.path.write_bytes(external)
 
-        with patch("repo_agent.tools.difflib.unified_diff", side_effect=change_file), patch.object(
+        with patch("repo_agent.core.tools.difflib.unified_diff", side_effect=change_file), patch.object(
                 self.tools, "apply_patch", wraps=self.tools.apply_patch) as apply:
             with self.assertRaisesRegex(ValueError, "changed while preparing"):
                 self.tools.replace_lines(read["snapshot_id"], 2, 2, "    return a + b\n")
@@ -139,7 +139,7 @@ class SnapshotTest(unittest.TestCase):
                 self.path.write_bytes(external)
             return result
 
-        with patch("repo_agent.tools.subprocess.run", side_effect=change_file) as run:
+        with patch("repo_agent.core.tools.subprocess.run", side_effect=change_file) as run:
             result = self.tools.replace_lines(read["snapshot_id"], 2, 2, "    return a + b\n")
         self.assertFalse(result["applied"], result)
         self.assertEqual("version_check", result["stage"])
@@ -156,7 +156,7 @@ class SnapshotTest(unittest.TestCase):
                 self.path.write_bytes(self.path.read_bytes() + b"# external\n")
             return result
 
-        with patch("repo_agent.tools.subprocess.run", side_effect=change_file):
+        with patch("repo_agent.core.tools.subprocess.run", side_effect=change_file):
             result = self.tools.replace_lines(read["snapshot_id"], 2, 2, "    return a + b\n")
         self.assertTrue(result["applied"], result)
         self.assertFalse(result["consistent"], result)

@@ -5,8 +5,8 @@ import tempfile
 import unittest
 
 from examples.live_llm_smoke import run_smoke
-from repo_agent.decisions import Decision
-from repo_agent.workspace import create_worktree
+from repo_agent.core.decisions import Decision
+from repo_agent.core.workspace import create_worktree
 
 
 class WorkspaceTest(unittest.TestCase):

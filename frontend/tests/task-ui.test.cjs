@@ -71,3 +71,22 @@ test('experiment status query can recover after a failed read',async()=>{let rea
 test('uncertain experiment start requires a status read before another confirmation',async()=>{const calls=[];const h=harness(async(url,o)=>{calls.push({url,o});if(o?.method==='POST')throw Error('connection lost');return ok({run:null,active:false,canStart:true,liveness:'not_assessed'})});await h.run("experimentStartControl('/fixture','browser-use','browser-use-5998')");await h.nodes.get('#confirm-experiment-start').onclick();await h.nodes.get('#confirm-experiment-start').onclick();assert.equal(calls.filter(c=>c.o?.method==='POST').length,1);assert.match(h.nodes.get('#experiment-run-control').innerHTML,/id="start-experiment-run" disabled/);await h.nodes.get('#query-experiment-run').onclick();assert.equal(calls.filter(c=>c.o?.method==='POST').length,1);});
 
 test('history registered materials load by ID and old verification cannot be upgraded',async()=>{const calls=[];const h=harness(async(url,o)=>{calls.push({url,o});return ok({artifactId:'verify-02-report',kind:'report',content:'historical report',offset:0,nextOffset:17,totalChars:17,hasMore:false,redacted:true,truncated:true})});h.run("historyMaterials('/api/projects/p/tasks/t/rounds/r',[{artifactId:'verify-02-report',kind:'report',label:'第二次验收',available:true}],'verify-02-report')");await h.nodes.get('#history-material-load-0').onclick();assert.match(calls[0].url,/artifacts\/verify-02-report\?offset=0/);assert.equal(calls[0].o.method,undefined);assert.equal(h.nodes.get('#history-material-text-0').textContent,'historical report');assert.match(h.nodes.get('#history-material-note-0').textContent,/已截断/);assert.match(h.run("verificationVerdict({sourceFormat:'legacy_verification',rawStatus:'independently_verified',independentlyVerified:true})"),/不升级/);});
+
+
+test('queued execution disables resubmission and stays queryable',async()=>{
+ const queued={...executionState,executionId:'c'.repeat(32),status:'queued',canStart:false,startBlockReason:'ALREADY_STARTED',queuedAt:record.createdAt};
+ const calls=[];
+ const h=harness(async(url,o)=>{calls.push({url,o});return ok(queued)});
+ execPanel(h);await tick();
+ assert.match(h.nodes.get('#execution-status').innerHTML,/已入队，等待 Worker/);
+ assert.equal(h.nodes.get('#start-agent').disabled,true);
+ assert.equal(h.nodes.get('#query-result').disabled,true);
+ assert.equal(calls.filter(c=>c.o?.method==='POST').length,0);
+});
+
+test('worker interruption keeps unknown status and never offers automatic retry',async()=>{
+ const h=harness(async(url)=>url.endsWith('/events')?ok({events:[],nextCursor:0,hasMore:false}):ok({...running,status:'unknown',stopReason:'WORKER_INTERRUPTED',liveness:'unconfirmed'}));
+ execPanel(h);await tick();
+ assert.match(h.nodes.get('#execution-status').innerHTML,/保留修改和日志待核实/);
+ assert.equal(h.nodes.get('#start-agent').disabled,true);
+});

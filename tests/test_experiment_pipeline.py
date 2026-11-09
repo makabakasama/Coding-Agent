@@ -10,10 +10,10 @@ import unittest
 from unittest.mock import patch
 
 from examples import browser_use_5998 as entry
-from repo_agent.agent import Agent
-from repo_agent.decisions import Decision
-from repo_agent.experiments import ExperimentSpec, _sha
-from repo_agent.provider import ProviderError
+from repo_agent.core.agent import Agent
+from repo_agent.core.decisions import Decision
+from repo_agent.experimentation.experiments import ExperimentSpec, _sha
+from repo_agent.core.provider import ProviderError
 
 
 class FixtureModel:
@@ -73,7 +73,7 @@ class PipelineTest(unittest.TestCase):
             control_targets=("test_calc.py::test_control",), import_module="calc", editable_paths=("calc.py",))
         self.addCleanup(self.remove_worktrees)
         # A missing fixture patch must fail closed, never reach a real model endpoint.
-        network = patch("repo_agent.provider.urllib.request.urlopen", side_effect=AssertionError("network forbidden"))
+        network = patch("repo_agent.core.provider.urllib.request.urlopen", side_effect=AssertionError("network forbidden"))
         network.start()
         self.addCleanup(network.stop)
         self.providers = []
@@ -158,7 +158,7 @@ class PipelineTest(unittest.TestCase):
         snapshot = json.loads(Path(result["agent_source"]["manifest"]).read_text(encoding="utf-8"))
         self.assertEqual(Path(entry.__file__).resolve().parent.parent, Path(snapshot["source_root"]))
         self.assertNotEqual(self.root, Path(snapshot["source_root"]))
-        self.assertIn("repo_agent/run_evidence.py", snapshot["files"])
+        self.assertIn("repo_agent/infrastructure/run_evidence.py", snapshot["files"])
         self.assertIn("examples/browser_use_5998.py", snapshot["files"])
         self.assertEqual("unchanged", result["agent_source_check"]["status"])
         self.assertTrue(Path(result["agent_source_check"]["report"]).is_file())
@@ -247,7 +247,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual("user_interrupted", result["verification_skip_reason"])
 
     def test_user_interrupt_in_prepare_preserves_report_and_exact_manifest_link(self):
-        with patch("repo_agent.experiments._run_import_probe", side_effect=KeyboardInterrupt), \
+        with patch("repo_agent.experimentation.experiments._run_import_probe", side_effect=KeyboardInterrupt), \
                 patch.object(entry, "verify_experiment") as verify:
             result = self.invoke()
             verify.assert_not_called()
@@ -269,7 +269,7 @@ class PipelineTest(unittest.TestCase):
     def test_verify_internal_interrupt_is_reflected_without_repeating_it(self):
         real_verify = entry.verify_experiment
         def interrupt_verify(*args, **kwargs):
-            with patch("repo_agent.experiments._run_import_probe", side_effect=KeyboardInterrupt):
+            with patch("repo_agent.experimentation.experiments._run_import_probe", side_effect=KeyboardInterrupt):
                 return real_verify(*args, **kwargs)
         with patch.object(entry, "verify_experiment", side_effect=interrupt_verify) as verify:
             result = self.invoke()

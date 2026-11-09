@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from repo_agent.task_cli import main
+from repo_agent.cli.task_cli import main
 from tests import test_tasks as fixtures
 from tests import test_project_task_store as project_fixtures
 
@@ -59,7 +59,7 @@ class TaskCLITest(unittest.TestCase):
             self.assertEqual(2, self.invoke(port, 'create', '--file', str(path))[0])
 
     def test_lost_start_response_is_unknown_and_not_retried(self):
-        with patch('repo_agent.task_cli.HTTPConnection') as factory:
+        with patch('repo_agent.cli.task_cli.HTTPConnection') as factory:
             connection = factory.return_value
             connection.getresponse.side_effect = ConnectionResetError('lost reply')
             code, error = self.invoke(4176, 'start', 'a' * 32)

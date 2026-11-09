@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from repo_agent.run_evidence import archive_agent_source, check_agent_source, sha256, source_archive_summary
+from repo_agent.infrastructure.run_evidence import archive_agent_source, check_agent_source, sha256, source_archive_summary
 
 
 class SourceEvidenceTest(unittest.TestCase):
@@ -77,6 +77,20 @@ class SourceEvidenceTest(unittest.TestCase):
         again = check_agent_source(source_archive_summary(path))
         self.assertNotEqual(checked["report"], again["report"])
 
+    def test_structured_packages_are_captured_and_checked(self):
+        for name in ('repo_agent/core/agent.py', 'repo_agent/backend/services/task_service.py',
+                     'repo_agent/backend/repositories/database_task_store.py'):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b'# structured source\n')
+        (self.root / 'repo_agent/agent.py').unlink()
+        report = self.capture()
+        self.assertEqual('captured', report['status'])
+        self.assertIn('repo_agent/core/agent.py', report['files'])
+        self.assertIn('repo_agent/backend/services/task_service.py', report['files'])
+        checked = check_agent_source(source_archive_summary(Path(report['manifest'])))
+        self.assertEqual('unchanged', checked['status'])
+
     def test_second_explicit_entry_is_archived_without_including_other_examples(self):
         (self.root / "examples/pydantic_ai_10525.py").write_bytes(b"# second entry\n")
         (self.root / "examples/unrelated.py").write_bytes(b"never-copy-fixture-secret")
@@ -108,7 +122,7 @@ class SourceEvidenceTest(unittest.TestCase):
         self.assertNotIn(b"never-copy-linked-secret", Path(report["manifest"]).read_bytes())
 
     def test_source_changing_during_capture_is_not_called_stable(self):
-        from repo_agent import run_evidence
+        from repo_agent.infrastructure import run_evidence
         original = run_evidence._sources
         calls = 0
         def change(root):

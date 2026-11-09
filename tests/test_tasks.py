@@ -9,11 +9,11 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from repo_agent.task_contract import TaskError, load_json, validate_contract
-from repo_agent.task_http import create_server
-from repo_agent.task_projects import TaskProjects
-from repo_agent.task_service import TaskService
-from repo_agent.task_store import TaskStore
+from repo_agent.backend.schemas.task_contract import TaskError, load_json, validate_contract
+from repo_agent.backend.app import create_server
+from repo_agent.backend.repositories.task_projects import TaskProjects
+from repo_agent.backend.services.task_service import TaskService
+from repo_agent.backend.repositories.task_store import TaskStore
 
 
 def request_contract(**changes):
@@ -197,7 +197,7 @@ class TaskIntegrationTest(unittest.TestCase):
         record = self.service.create(request_contract())
         class FixedUUID:
             hex = record["taskId"]
-        with patch("repo_agent.task_store.uuid.uuid4", return_value=FixedUUID()), self.assertRaises(TaskError):
+        with patch("repo_agent.backend.repositories.task_store.uuid.uuid4", return_value=FixedUUID()), self.assertRaises(TaskError):
             self.service.create(request_contract(expected="different task"))
         self.assertEqual(record, self.service.get(record["taskId"]))
 

@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from repo_agent.round_layout import allocate_round, allocate_verification, workspace_name, write_summary
-from repo_agent.path_migrations import recorded_path
-from repo_agent.experiments import ExperimentSpec
-from repo_agent.experiment_verify import verify_experiment
+from repo_agent.infrastructure.round_layout import allocate_round, allocate_verification, workspace_name, write_summary
+from repo_agent.infrastructure.path_migrations import recorded_path
+from repo_agent.experimentation.experiments import ExperimentSpec
+from repo_agent.experimentation.experiment_verify import verify_experiment
 
 
 class RoundLayoutTest(unittest.TestCase):
@@ -54,13 +54,13 @@ class RoundLayoutTest(unittest.TestCase):
             root = Path(temp)
             first = "20261029-144226_12345678"
             second = "20261029-144226_abcdef12"
-            with patch("repo_agent.round_layout.new_round_id", side_effect=[first, first, second]):
+            with patch("repo_agent.infrastructure.round_layout.new_round_id", side_effect=[first, first, second]):
                 one, identifier = allocate_round(root, "run", "pydantic-ai-10525")
                 two, _ = allocate_round(root, "prepare", "pydantic-ai-10525")
             self.assertEqual(first, identifier)
             self.assertEqual("prepare_" + second, two.name)
             third = "20261029-144226_abcdef13"
-            with patch("repo_agent.round_layout.new_round_id", side_effect=[first, second, third]):
+            with patch("repo_agent.infrastructure.round_layout.new_round_id", side_effect=[first, second, third]):
                 three, _ = allocate_round(root, "run", "pydantic-ai-10525")
             self.assertEqual("run_" + third, three.name)
             self.assertEqual("verify-01", allocate_verification(one)[1])

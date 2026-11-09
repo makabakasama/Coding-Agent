@@ -9,8 +9,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from repo_agent.experiment_runner import ExperimentRunner
-from repo_agent.experiments import ExperimentSpec
+from repo_agent.experimentation.experiment_runner import ExperimentRunner
+from repo_agent.experimentation.experiments import ExperimentSpec
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

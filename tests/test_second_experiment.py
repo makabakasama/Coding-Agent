@@ -14,10 +14,10 @@ import unittest
 from unittest.mock import patch
 
 from examples import browser_use_5998, pydantic_ai_10525 as entry
-from repo_agent.decisions import Decision
-from repo_agent.experiment_runner import ExperimentRunner
-from repo_agent.experiments import ExperimentSpec, experiment_environment
-from repo_agent.run_evidence import sha256
+from repo_agent.core.decisions import Decision
+from repo_agent.experimentation.experiment_runner import ExperimentRunner
+from repo_agent.experimentation.experiments import ExperimentSpec, experiment_environment
+from repo_agent.infrastructure.run_evidence import sha256
 
 
 def regression_namespace(root):
@@ -168,7 +168,7 @@ class WorkspaceEnvironmentTest(unittest.TestCase):
                         return Decision("run_tests", {"target": "test_pkg.py::test_regression"})
                     return Decision("finish", {"answer": "Synthetic candidate"})
             try:
-                with patch("repo_agent.provider.urllib.request.urlopen", side_effect=AssertionError("network forbidden")):
+                with patch("repo_agent.core.provider.urllib.request.urlopen", side_effect=AssertionError("network forbidden")):
                     result = ExperimentRunner(root, "Synthetic nested import", 4, model_factory=Model).run_experiment(spec)
                 self.assertEqual(0, result["exit_code"], result)
                 before = json.loads(Path(result["prepare_manifest"]).read_text(encoding="utf-8"))

@@ -12,10 +12,10 @@ import unittest
 from unittest.mock import call, patch
 import urllib.error
 
-from repo_agent.agent import Agent
-from repo_agent.decisions import Decision, DecisionError
-from repo_agent.provider import OpenAICompatibleProvider, ProviderError
-from repo_agent.tools import RepoTools
+from repo_agent.core.agent import Agent
+from repo_agent.core.decisions import Decision, DecisionError
+from repo_agent.core.provider import OpenAICompatibleProvider, ProviderError
+from repo_agent.core.tools import RepoTools
 
 
 def response(message=None, *, finish_reason="tool_calls"):
@@ -31,9 +31,9 @@ def eof():
 class ProviderRetryTest(unittest.TestCase):
     def setUp(self):
         # All requests and waits are intercepted, including unexpected calls.
-        for target, values in (("repo_agent.provider.read_dotenv", {"return_value": {}}),
-                               ("repo_agent.provider.urllib.request.urlopen", {}),
-                               ("repo_agent.provider.time.sleep", {})):
+        for target, values in (("repo_agent.core.provider.read_dotenv", {"return_value": {}}),
+                               ("repo_agent.core.provider.urllib.request.urlopen", {}),
+                               ("repo_agent.core.provider.time.sleep", {})):
             patcher = patch(target, **values)
             mock = patcher.start()
             self.addCleanup(patcher.stop)

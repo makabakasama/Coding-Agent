@@ -3,9 +3,9 @@ import argparse
 import json
 from pathlib import Path
 
-from .agent import Agent
-from .provider import OpenAICompatibleProvider, ProviderError
-from .tools import RepoTools
+from repo_agent.core.agent import Agent
+from repo_agent.core.provider import OpenAICompatibleProvider, ProviderError
+from repo_agent.core.tools import RepoTools
 
 
 def main():

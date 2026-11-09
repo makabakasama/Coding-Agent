@@ -8,11 +8,11 @@ from unittest.mock import patch
 
 from tests import test_tasks as fixtures
 from tests.test_tasks import request_contract, serving, http
-from repo_agent.decisions import Decision
-from repo_agent.task_contract import TaskError
-from repo_agent.task_projects import TaskProjects
-from repo_agent.task_service import TaskService
-from repo_agent.task_store import TaskStore
+from repo_agent.core.decisions import Decision
+from repo_agent.backend.schemas.task_contract import TaskError
+from repo_agent.backend.repositories.task_projects import TaskProjects
+from repo_agent.backend.services.task_service import TaskService
+from repo_agent.backend.repositories.task_store import TaskStore
 
 
 class ScriptedModel:
@@ -354,7 +354,7 @@ class ExecutionTest(unittest.TestCase):
                 result = self.finish(task_id)
                 self.assertEqual("failed", result["finalChecks"]["status"])
         task_id = self.task()
-        with patch("repo_agent.task_execution_tools.ET.fromstring", side_effect=ValueError("corrupt fixture")):
+        with patch("repo_agent.backend.services.task_execution_tools.ET.fromstring", side_effect=ValueError("corrupt fixture")):
             self.service.execution.start(task_id, {})
             result = self.finish(task_id)
         self.assertIsNone(result["finalChecks"]["counts"])
@@ -362,12 +362,12 @@ class ExecutionTest(unittest.TestCase):
 
     def test_delivery_state_failure_is_diagnosed(self):
         task_id = self.task(allowTests=False, checkTargets=[])
-        from repo_agent.task_execution import write_json
+        from repo_agent.backend.services.task_execution import write_json
         def failing_write(path, value):
             if path.name == 'state.json' and value.get('phase') == 'delivery':
                 raise OSError('synthetic delivery state failure')
             return write_json(path, value)
-        with patch('repo_agent.task_execution.write_json', side_effect=failing_write):
+        with patch('repo_agent.backend.services.task_execution.write_json', side_effect=failing_write):
             self.service.execution.start(task_id, {})
             for thread in self.service.execution.threads:
                 thread.join(15)
@@ -388,12 +388,12 @@ class ExecutionTest(unittest.TestCase):
         self.assertEqual("not_run", result["finalChecks"]["status"])
         self.service = self.service_for(lambda: ScriptedModel())
         second = self.task(allowTests=False, checkTargets=[])
-        from repo_agent.task_execution import write_json
+        from repo_agent.backend.services.task_execution import write_json
         def failing_write(path, value):
             if path.name == "result.json":
                 raise OSError("synthetic disk error")
             return write_json(path, value)
-        with patch("repo_agent.task_execution.write_json", side_effect=failing_write):
+        with patch("repo_agent.backend.services.task_execution.write_json", side_effect=failing_write):
             self.service.execution.start(second, {})
             for thread in self.service.execution.threads:
                 thread.join(15)

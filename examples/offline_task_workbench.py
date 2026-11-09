@@ -12,11 +12,11 @@ import subprocess
 import sys
 import tempfile
 
-from repo_agent.decisions import Decision
-from repo_agent.task_http import create_server
-from repo_agent.task_projects import TaskProjects
-from repo_agent.task_service import TaskService
-from repo_agent.task_store import TaskStore
+from repo_agent.core.decisions import Decision
+from repo_agent.backend.routers.task_http import create_server
+from repo_agent.backend.repositories.task_projects import TaskProjects
+from repo_agent.backend.services.task_service import TaskService
+from repo_agent.backend.repositories.task_store import TaskStore
 
 
 class FixtureModel:

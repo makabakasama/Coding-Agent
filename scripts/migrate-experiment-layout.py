@@ -17,7 +17,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from repo_agent.experiments import _files
+from repo_agent.experimentation.experiments import _files
 
 AREA = ROOT / "experiments"
 REPORT = ROOT / "runs/migrations" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8])

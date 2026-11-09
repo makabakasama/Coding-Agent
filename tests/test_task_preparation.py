@@ -10,11 +10,11 @@ from unittest.mock import patch
 
 from tests import test_tasks as fixtures
 from tests.test_tasks import request_contract, serving, http
-from repo_agent.task_contract import TaskError
-from repo_agent.task_projects import TaskProjects
-from repo_agent.task_store import TaskStore
-from repo_agent.task_service import TaskService
-from repo_agent.task_preparation import create_worktree
+from repo_agent.backend.schemas.task_contract import TaskError
+from repo_agent.backend.repositories.task_projects import TaskProjects
+from repo_agent.backend.repositories.task_store import TaskStore
+from repo_agent.backend.services.task_service import TaskService
+from repo_agent.backend.services.task_preparation import create_worktree
 
 
 class PreparationTest(unittest.TestCase):
@@ -30,7 +30,7 @@ class PreparationTest(unittest.TestCase):
 
     def test_failed_git_diagnostics_are_saved_and_publicly_readable(self):
         task_id = self.task()
-        with patch('repo_agent.task_preparation.create_worktree', side_effect=subprocess.CalledProcessError(
+        with patch('repo_agent.backend.services.task_preparation.create_worktree', side_effect=subprocess.CalledProcessError(
                 128, ['git', 'worktree', 'add', str(self.root / 'destination')], output='partial output', stderr='fatal: fixture failure')):
             self.assertEqual('preparation_failed', self.service.prepare(task_id, {})['status'])
         saved = json.loads((self.directory(task_id) / 'diagnostics.json').read_text())
@@ -71,7 +71,7 @@ class PreparationTest(unittest.TestCase):
             entered.set()
             self.assertTrue(release.wait(10))
             return create_worktree(*args, **kwargs)
-        with patch("repo_agent.task_preparation.create_worktree", side_effect=delayed) as create:
+        with patch("repo_agent.backend.services.task_preparation.create_worktree", side_effect=delayed) as create:
             with ThreadPoolExecutor() as pool:
                 future = pool.submit(self.service.prepare, task_id, {})
                 self.assertTrue(entered.wait(10))
@@ -89,7 +89,7 @@ class PreparationTest(unittest.TestCase):
             destination.mkdir()
             (destination / "partial").write_text("retained")
             raise OSError("private-path")
-        with patch("repo_agent.task_preparation.create_worktree", side_effect=fail) as create:
+        with patch("repo_agent.backend.services.task_preparation.create_worktree", side_effect=fail) as create:
             result = self.service.prepare(task_id, {})
             self.assertEqual("preparation_failed", result["status"])
             self.assertEqual(result, self.service.prepare(task_id, {}))
@@ -109,7 +109,7 @@ class PreparationTest(unittest.TestCase):
         task_id = self.task()
         self.directory(task_id).mkdir()
         lock = self.directory(task_id).parent / "preparation.lock"
-        script = "from pathlib import Path; from repo_agent.task_preparation import exclusive; import sys; "
+        script = "from pathlib import Path; from repo_agent.infrastructure.file_io import exclusive; import sys; "
         script += "\nwith exclusive(Path(sys.argv[1])) as held:\n print(held, flush=True)\n sys.stdin.readline()\n"
         child = subprocess.Popen([sys.executable, "-c", script, str(lock)], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -135,7 +135,7 @@ class PreparationTest(unittest.TestCase):
 
     def test_storage_failure_is_not_success_and_claim_is_retained(self):
         task_id = self.task()
-        with patch("repo_agent.task_preparation.write_json", side_effect=OSError("private")):
+        with patch("repo_agent.backend.services.task_preparation.write_json", side_effect=OSError("private")):
             with self.assertRaises(TaskError) as error:
                 self.service.prepare(task_id, {})
         self.assertEqual("STORAGE_UNAVAILABLE", error.exception.code)

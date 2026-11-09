@@ -6,11 +6,11 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from repo_agent.experiment_runs import ExperimentRuns
-from repo_agent.experiments import ExperimentSpec
-from repo_agent.round_layout import ID_PATTERN
-from repo_agent.task_contract import TaskError
-from repo_agent.task_store import TaskStore
+from repo_agent.backend.services.experiment_runs import ExperimentRuns
+from repo_agent.experimentation.experiments import ExperimentSpec
+from repo_agent.infrastructure.round_layout import ID_PATTERN
+from repo_agent.backend.schemas.task_contract import TaskError
+from repo_agent.backend.repositories.task_store import TaskStore
 from tests import test_tasks as fixtures
 
 

@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from repo_agent.agent import Agent
-from repo_agent.decisions import Decision
-from repo_agent.tools import RepoTools
+from repo_agent.core.agent import Agent
+from repo_agent.core.decisions import Decision
+from repo_agent.core.tools import RepoTools
 
 
 class FakeModel:

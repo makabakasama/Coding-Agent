@@ -8,10 +8,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from repo_agent.experiments import ExperimentSpec, _files, _sha, claim_baseline, validate_baseline
-from repo_agent.experiment_artifacts import export_run_artifacts
-from repo_agent.experiment_verify import _read_candidate
-from repo_agent.path_migrations import recorded_path, recorded_environment
+from repo_agent.experimentation.experiments import ExperimentSpec, _files, _sha, claim_baseline, validate_baseline
+from repo_agent.experimentation.experiment_artifacts import export_run_artifacts
+from repo_agent.experimentation.experiment_verify import _read_candidate
+from repo_agent.infrastructure.path_migrations import recorded_path, recorded_environment
 
 
 class PathMigrationTest(unittest.TestCase):

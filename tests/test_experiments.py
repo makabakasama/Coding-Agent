@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from repo_agent.experiments import ExperimentSpec, _capture, claim_baseline, prepare_experiment, validate_baseline
+from repo_agent.experimentation.experiments import ExperimentSpec, _capture, claim_baseline, prepare_experiment, validate_baseline
 from examples import browser_use_5998 as entry
 
 

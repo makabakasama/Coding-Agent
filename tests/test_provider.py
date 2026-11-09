@@ -7,10 +7,10 @@ import unittest
 from unittest.mock import patch
 
 from examples.live_llm_smoke import run_smoke
-from repo_agent.agent import Agent
-from repo_agent.decisions import Decision, DecisionError, parse_tool_decision
-from repo_agent.provider import OpenAICompatibleProvider, ProviderError
-from repo_agent.tools import RepoTools
+from repo_agent.core.agent import Agent
+from repo_agent.core.decisions import Decision, DecisionError, parse_tool_decision
+from repo_agent.core.provider import OpenAICompatibleProvider, ProviderError
+from repo_agent.core.tools import RepoTools
 
 
 def response(message, finish_reason="tool_calls"):
@@ -21,7 +21,7 @@ def response(message, finish_reason="tool_calls"):
 
 class ProviderTest(unittest.TestCase):
     def setUp(self):
-        config = patch("repo_agent.provider.read_dotenv", return_value={})
+        config = patch("repo_agent.core.provider.read_dotenv", return_value={})
         config.start()
         self.addCleanup(config.stop)
         self.provider = OpenAICompatibleProvider(
@@ -32,7 +32,7 @@ class ProviderTest(unittest.TestCase):
                 "new_text": 'print("a\\b")\n\t# 中文\n'}
         native_message = Decision("replace_lines", args, "call_edit").assistant_message
         native_message["reasoning_content"] = "opaque-provider-metadata"
-        with patch("repo_agent.provider.urllib.request.urlopen",
+        with patch("repo_agent.core.provider.urllib.request.urlopen",
                    return_value=response(native_message)) as request:
             decision = self.provider.decide([{"role": "user", "content": "Repair code"}])
 
@@ -72,7 +72,7 @@ class ProviderTest(unittest.TestCase):
             return response(Decision("finish", {"answer": marker}, "call_finish").assistant_message)
 
         with tempfile.TemporaryDirectory() as directory, patch(
-                "repo_agent.provider.urllib.request.urlopen", side_effect=send):
+                "repo_agent.core.provider.urllib.request.urlopen", side_effect=send):
             self.assertTrue(run_smoke(self.provider, Path(directory))["smoke_passed"])
         self.assertEqual(2, len(requests))
 
@@ -94,7 +94,7 @@ class ProviderTest(unittest.TestCase):
             return response(Decision("finish", {"answer": "Cannot proceed."}).assistant_message)
 
         with tempfile.TemporaryDirectory() as directory, patch(
-                "repo_agent.provider.urllib.request.urlopen", side_effect=send):
+                "repo_agent.core.provider.urllib.request.urlopen", side_effect=send):
             tools = RepoTools(Path(directory))
             with patch.object(tools, "execute", wraps=tools.execute) as execute:
                 agent = Agent(self.provider, tools, trace_dir=Path(directory) / "traces", max_steps=2)
@@ -128,7 +128,7 @@ class ProviderTest(unittest.TestCase):
             return response(Decision("finish", {"answer": "No edits made."}).assistant_message)
 
         with tempfile.TemporaryDirectory() as directory, patch(
-                "repo_agent.provider.urllib.request.urlopen", side_effect=send):
+                "repo_agent.core.provider.urllib.request.urlopen", side_effect=send):
             root = Path(directory)
             (root / "sample.py").write_bytes(b"original")
             tools = RepoTools(root, allow_writes=True)
@@ -141,7 +141,7 @@ class ProviderTest(unittest.TestCase):
     def test_repeated_protocol_errors_stop_at_existing_step_budget(self):
         ordinary_text = {"role": "assistant", "content": '{"action":"finish","args":{"answer":"done"}}'}
         with tempfile.TemporaryDirectory() as directory, patch(
-                "repo_agent.provider.urllib.request.urlopen", side_effect=lambda *a, **k: response(ordinary_text)) as send:
+                "repo_agent.core.provider.urllib.request.urlopen", side_effect=lambda *a, **k: response(ordinary_text)) as send:
             root = Path(directory)
             tools = RepoTools(root)
             with patch.object(tools, "execute", wraps=tools.execute) as execute:
@@ -173,7 +173,7 @@ class ProviderTest(unittest.TestCase):
 
     def test_truncated_response_never_becomes_a_decision(self):
         message = Decision("run_tests", {"target": "tests"}).assistant_message
-        with patch("repo_agent.provider.urllib.request.urlopen", return_value=response(message, "length")):
+        with patch("repo_agent.core.provider.urllib.request.urlopen", return_value=response(message, "length")):
             with self.assertRaisesRegex(ProviderError, "truncated"):
                 self.provider.decide([])
 

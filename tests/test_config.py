@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from repo_agent.config import read_dotenv
-from repo_agent.provider import OpenAICompatibleProvider
+from repo_agent.core.config import read_dotenv
+from repo_agent.core.provider import OpenAICompatibleProvider
 
 
 class ConfigTest(unittest.TestCase):
@@ -16,7 +16,7 @@ class ConfigTest(unittest.TestCase):
             local.update({f"{name.upper()}_MODEL": name,
                           f"{name.upper()}_BASE_URL": f"https://{name}.invalid/v1",
                           f"{name.upper()}_API_KEY": f"{name}-key"})
-        with patch("repo_agent.provider.read_dotenv", return_value=local), patch.dict(os.environ, {}, clear=True):
+        with patch("repo_agent.core.provider.read_dotenv", return_value=local), patch.dict(os.environ, {}, clear=True):
             for name in ("gpt", "qwen"):
                 with patch.dict(os.environ, {"LLM_PROFILE": name, "OPENAI_API_KEY": "unrelated"}):
                     p = OpenAICompatibleProvider()
@@ -35,7 +35,7 @@ class ConfigTest(unittest.TestCase):
         local = {"LLM_PROVIDER": "openai_compatible", "LLM_MODEL": "new-model",
                  "LLM_BASE_URL": "https://example.invalid/v1/", "LLM_API_KEY": "new-key",
                  "OPENAI_MODEL": "old-model", "OPENAI_API_KEY": "old-key"}
-        with patch("repo_agent.provider.read_dotenv", return_value=local), patch.dict(os.environ, {}, clear=True):
+        with patch("repo_agent.core.provider.read_dotenv", return_value=local), patch.dict(os.environ, {}, clear=True):
             provider = OpenAICompatibleProvider()
             self.assertEqual(("new-model", "https://example.invalid/v1", "new-key"),
                              (provider.model, provider.base_url, provider.api_key))
@@ -62,7 +62,7 @@ class ConfigTest(unittest.TestCase):
     def test_provider_configuration_precedence(self):
         local = {"OPENAI_MODEL": "file-model", "OPENAI_BASE_URL": "https://file.invalid/v1/",
                  "OPENAI_API_KEY": "file-key"}
-        with patch("repo_agent.provider.read_dotenv", return_value=local), patch.dict(os.environ, {}, clear=True):
+        with patch("repo_agent.core.provider.read_dotenv", return_value=local), patch.dict(os.environ, {}, clear=True):
             provider = OpenAICompatibleProvider()
             self.assertEqual("file-model", provider.model)
             self.assertEqual("https://file.invalid/v1", provider.base_url)
