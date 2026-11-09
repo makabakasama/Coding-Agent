@@ -18,7 +18,7 @@ DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/coding_agent
 .venv/Scripts/python.exe -m repo_agent.task_http
 ```
 
-配置连接地址后，新需求及第一轮记录在同一个 PostgreSQL 事务中提交。新增轮次通过外键关联原需求。`tasks.record` 保存需求 JSON，`task_runs.record` 保存轮次任务 JSON，`metadata` 保存目录关联信息。数据库保存的是创建记录，执行进度仍由现有执行材料提供。
+配置连接地址后，新需求及第一轮记录在同一个 PostgreSQL 事务中提交。新增轮次通过外键关联原需求。`tasks.record` 保存需求 JSON，`task_runs.record` 保存轮次任务 JSON，`metadata` 保存目录关联信息。数据库同时由 task_dispatch 保存调度状态、领取与心跳，task_trash 保存回收站状态；细粒度执行事件、结果、Diff 和撤回材料仍由文件提供。
 
 数据库提交后生成现有目录结构中的 JSON 文件。文件写入失败时返回包含任务 ID 的错误，数据库记录保留。读取该任务或其轮次列表时会重试生成缺失文件。提交结果不明确时，先查询任务列表确认已保存记录，再决定是否重新提交。
 

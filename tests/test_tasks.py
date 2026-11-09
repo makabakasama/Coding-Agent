@@ -60,7 +60,7 @@ class TaskContractTest(unittest.TestCase):
         contract = validate_contract(request_contract(current="  first\nsecond  ", allowedPaths=[" calc.py "]))
         self.assertEqual("first\nsecond", contract["current"])
         self.assertEqual(["calc.py"], contract["allowedPaths"])
-        self.assertEqual((12, "fix_bug"), (contract["maxSteps"], contract["kind"]))
+        self.assertEqual((50, "fix_bug"), (contract["maxSteps"], contract["kind"]))
         self.assertFalse(validate_contract(request_contract(allowTests=False, checkTargets=[]))["allowTests"])
 
     def test_reject_invalid_fields_types_paths_and_targets(self):
@@ -184,7 +184,7 @@ class TaskIntegrationTest(unittest.TestCase):
         for broken in [b"{broken", original.replace(b'"schemaVersion": 1', b'"schemaVersion": true'),
                        original.replace(b'"status": "created"', b'"status": "passed"'),
                        original.replace(record["taskId"].encode(), b"b" * 32),
-                       original.replace(b'"maxSteps": 12', b'"maxSteps": 0')]:
+                       original.replace(b'"maxSteps": 50', b'"maxSteps": 0')]:
             path.write_bytes(broken)
             with self.assertRaises(TaskError) as error:
                 self.service.get(record["taskId"])

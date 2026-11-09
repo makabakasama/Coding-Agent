@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 CONFIG_KEYS = {"LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY",
-               "LLM_PROFILE", "OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY", "DASHSCOPE_API_KEY", "DATABASE_URL"}
+               "LLM_PROFILE", "OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY", "DASHSCOPE_API_KEY", "DATABASE_URL", "REDIS_URL"}
 CONFIG_KEYS.update(f"{profile}_{field}" for profile in ("QWEN", "GPT")
                    for field in ("MODEL", "BASE_URL", "API_KEY"))
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"

@@ -19,6 +19,20 @@ class ProjectRoundsTest(unittest.TestCase):
                            TaskProjects(self.config), workspace_root=self.root / 'legacy-workspaces',
                            project_root=self.root, model_factory=ScriptedModel)
 
+    def test_new_round_budget_override_preserves_previous_contracts(self):
+        from repo_agent.backend.schemas.task_contract import TaskError
+        service = self.service_for()
+        original = service.create(fixtures.request_contract(allowTests=False, checkTargets=[], maxSteps=12))
+        key = service.organization(original['taskId'])['taskKey']
+        updated = service.new_round('sample', key, {'maxSteps': 50})
+        self.assertEqual(50, updated['contract']['maxSteps'])
+        self.assertEqual(12, service.get(original['taskId'])['contract']['maxSteps'])
+        self.assertEqual(12, service.ordinary_task('sample', key)['contract']['maxSteps'])
+        for budget in [0, 51, True, 1.5, '50']:
+            with self.subTest(budget=budget), self.assertRaises(TaskError):
+                service.new_round('sample', key, {'maxSteps': budget})
+        self.assertEqual(2, len(service.store.rounds('sample', key)))
+
     def test_two_rounds_restart_execution_and_legacy_preservation(self):
         legacy = self.service.create(fixtures.request_contract(allowTests=False, checkTargets=[]))
         legacy_path = self.data / ('task_' + legacy['taskId']) / 'task.json'
@@ -61,3 +75,18 @@ class ProjectRoundsTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RequirementOrderingTest(unittest.TestCase):
+    def test_project_requirements_are_newest_first_regardless_of_storage_order(self):
+        from types import SimpleNamespace
+        values = [
+            {'taskKey':'older','createdAt':'2026-11-02T09:00:00Z'},
+            {'taskKey':'maxsteps','createdAt':'2026-11-09T10:56:38+08:00'},
+            {'taskKey':'middle','createdAt':'2026-11-03T09:00:00Z'},
+        ]
+        service = TaskService.__new__(TaskService)
+        service.projects = SimpleNamespace(list=lambda:[{'projectId':'sample'}])
+        service.store = SimpleNamespace(requirements=lambda project:values, rounds=lambda project,key:[])
+        result = service.ordinary_tasks('sample')
+        self.assertEqual(['maxsteps','middle','older'],[v['taskKey'] for v in result['tasks']])

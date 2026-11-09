@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import sys
+import os
 
 from repo_agent.backend.schemas.task_contract import COMMIT, PROJECT_ID, TaskError, load_json
 
@@ -12,7 +13,7 @@ class TaskProjects:
     def __init__(self, config_path: Path):
         self.config_path = config_path.resolve()
 
-    def _projects(self) -> dict:
+    def _configured_projects(self) -> dict:
         try:
             with self.config_path.open("rb") as stream:
                 data = stream.read(1024 * 1024 + 1)
@@ -36,6 +37,41 @@ class TaskProjects:
         except (OSError, ValueError, TypeError, UnicodeError, RecursionError) as exc:
             raise TaskError(503, "PROJECT_CONFIG_UNAVAILABLE", "本机项目配置无法读取") from exc
 
+    def _projects(self):
+        result = self._configured_projects()
+        path = self.config_path.parent / 'local-targets.json'
+        if path.exists():
+            from repo_agent.infrastructure.file_io import read_json
+            local = read_json(path)
+            for project in local.get('projects',[]):
+                if (not PROJECT_ID.fullmatch(project.get('projectId',''))
+                        or project.get('sourceKind') not in ('git','directory')
+                        or not isinstance(project.get('repo'),str) or not Path(project['repo']).is_absolute()):
+                    raise TaskError(503,'PROJECT_CONFIG_UNAVAILABLE','本机目标登记损坏')
+                result.setdefault(project['projectId'],project)
+        return result
+
+    def register_local(self, root, source_kind):
+        import hashlib
+        from repo_agent.infrastructure.file_io import exclusive, read_json, write_json
+        for identifier,project in self._projects().items():
+            candidate=Path(project['repo'])
+            candidate=(candidate if candidate.is_absolute() else self.config_path.parent/candidate).resolve()
+            if candidate==root:
+                return identifier
+        identifier='local-'+hashlib.sha256(os.path.normcase(str(root)).encode()).hexdigest()[:16]
+        self.config_path.parent.mkdir(parents=True,exist_ok=True)
+        with exclusive(self.config_path.parent/'local-targets.lock') as acquired:
+            if not acquired:
+                raise TaskError(409,'PROJECT_REGISTRY_BUSY','目标正在登记，请稍后重试')
+            path=self.config_path.parent/'local-targets.json'
+            data=read_json(path) if path.exists() else {'projects':[]}
+            if not any(p['projectId']==identifier for p in data['projects']):
+                data['projects'].append({'projectId':identifier,'name':root.name or str(root),
+                                         'repo':str(root),'sourceKind':source_kind})
+                write_json(path,data)
+        return identifier
+
     def list(self) -> list[dict]:
         return [{"projectId": p["projectId"], "name": p["name"]}
                 for p in self._projects().values()]
@@ -44,6 +80,10 @@ class TaskProjects:
         project = self._projects().get(project_id)
         if project is None:
             raise TaskError(400, "UNKNOWN_PROJECT", "未配置该项目")
+        if project.get('sourceKind') == 'directory':
+            if revision not in (None,'CURRENT','HEAD') or not Path(project['repo']).is_dir():
+                raise TaskError(400,'INVALID_REVISION','普通目录使用当前文件状态')
+            return None
         try:
             repo = Path(project["repo"])
             if not repo.is_absolute():

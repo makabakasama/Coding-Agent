@@ -14,7 +14,7 @@ def main():
     p.add_argument("--task", required=True, help="Issue / coding task description")
     p.add_argument("--model", help="Override OPENAI_MODEL")
     p.add_argument("--base-url", help="Override OPENAI_BASE_URL")
-    p.add_argument("--max-steps", type=int, default=12)
+    p.add_argument("--max-steps", type=int, default=50)
     p.add_argument("--trace-dir", type=Path, default=Path("runs"))
     p.add_argument("--allow-writes", action="store_true", help="Allow git apply on checkout")
     p.add_argument("--allow-tests", action="store_true", help="Allow pytest; may execute untrusted repo code")

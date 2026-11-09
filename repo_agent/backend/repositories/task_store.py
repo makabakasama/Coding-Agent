@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import uuid
 from datetime import datetime
+from repo_agent.infrastructure.file_io import read_json, write_json, now
 
 from repo_agent.backend.schemas.task_contract import TASK_ID, TaskError, load_json, validate_record
 
@@ -16,6 +17,59 @@ class TaskStore:
 
     def directory(self, task_id):
         return self.root / f"task_{task_id}"
+
+    def close(self):
+        pass
+
+    def purge_path(self, task_id):
+        if not TASK_ID.fullmatch(task_id):
+            raise TaskError(400, 'INVALID_TASK_ID', '任务编号格式不正确')
+        path = self.root / 'purges' / (task_id + '.json')
+        if path.resolve() != path:
+            raise TaskError(503, 'STORAGE_UNAVAILABLE', '删除凭据位置不符合要求')
+        return path
+
+    def assert_not_purged(self, task_id):
+        if self.purge_path(task_id).exists():
+            raise TaskError(410, 'TASK_PURGED', '本轮已进入彻底删除流程，请查询删除状态')
+
+    def pending_purges(self):
+        result = []
+        for path in (self.root / 'purges').glob('*.json'):
+            value = read_json(path)
+            if value.get('status') == 'purging':
+                result.append(value)
+        return result
+
+    def deleted_ids(self):
+        return {path.stem for path in (self.root / 'trash').glob('*.json')}
+
+    def assert_active(self, task_id):
+        self.assert_not_purged(task_id)
+        if self.is_deleted(task_id):
+            raise TaskError(409, 'TASK_DELETED', '任务已移入回收站，请先恢复')
+
+    def is_deleted(self, task_id):
+        return task_id in self.deleted_ids()
+
+    def set_deleted(self, task_id, deleted):
+        self.get(task_id)
+        directory = self.root / 'trash'
+        path = directory / (task_id + '.json')
+        if directory.resolve() != directory or path.resolve() != path:
+            raise TaskError(503, 'STORAGE_UNAVAILABLE', '回收站记录位置不符合要求')
+        directory.mkdir(parents=True, exist_ok=True)
+        if deleted:
+            if not path.exists():
+                write_json(path, {'taskId': task_id, 'deletedAt': now()})
+        else:
+            path.unlink(missing_ok=True)
+
+    def purge_run(self, task_id, cleanup, *, relative_directory=None, relative_requirement=None):
+        if not self.is_deleted(task_id) and not self.purge_path(task_id).exists():
+            raise TaskError(409, 'TRASH_REQUIRED', '请先将本轮移入回收站')
+        cleanup(True)
+        (self.root / 'trash' / (task_id + '.json')).unlink(missing_ok=True)
 
     def create(self, build_record) -> dict:
         try:
@@ -44,6 +98,7 @@ class TaskStore:
     def get(self, task_id: str) -> dict:
         if not TASK_ID.fullmatch(task_id):
             raise TaskError(400, "INVALID_TASK_ID", "任务编号格式不正确")
+        self.assert_not_purged(task_id)
         directory = self.directory(task_id)
         path = directory / "task.json"
         try:
@@ -64,15 +119,18 @@ class TaskStore:
         except (ValueError, UnicodeError, RecursionError) as exc:
             raise TaskError(500, "TASK_RECORD_CORRUPT", "任务记录损坏，无法读取") from exc
 
-    def latest(self) -> list[dict]:
+    def latest(self, *, deleted=False) -> list[dict]:
         try:
             if not self.root.exists():
                 return []
             records = []
+            deleted_ids = self.deleted_ids()
             for directory in self.root.iterdir():
                 task_id = directory.name.removeprefix("task_")
                 if (directory.name.startswith("task_") and TASK_ID.fullmatch(task_id)
-                        and (directory / "task.json").exists()):
+                        and (directory / "task.json").exists()
+                        and not self.purge_path(task_id).exists()
+                        and (task_id in deleted_ids) == deleted):
                     records.append(self.get(task_id))
             records.sort(key=lambda r: (datetime.fromisoformat(r["createdAt"].replace("Z", "+00:00")), r["taskId"]), reverse=True)
             return records[:50]

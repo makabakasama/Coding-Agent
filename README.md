@@ -1,140 +1,101 @@
-# Coding Agent — V0.3 本地任务工作台
+# Coding Agent — V0.4 本地编码工作台
 
-一个面向学习和工程验证的仓库修复 Agent：连接真实 LLM，在独立 Git 工作副本中观察代码、执行受限编辑、运行定向测试，并用新的工作副本验收保存的补丁。
+面向学习和工程验证的 Coding Agent。输入本机项目、目录或文件路径及任务描述，由模型调用工具读取、搜索和修改代码，交付差异、检查结果、完成说明与运行记录。
 
-目前已在本机完成 **browser-use #5998** 和 **pydantic-ai #10525** 两项已知答案实验的独立验收。它们验证了两个具体历史缺陷上的修复链路，不代表通用修复成功率、模型稳定重复性或执行沙箱已经验证。两项均有公开参考修复，仅用于已知答案实验，不宣称参考修复已合入上游或由本项目贡献。
+**V0.4 当前范围：PostgreSQL 持久任务与独立 Worker 池、本机路径任务、直接修改与撤回、回收站、可选 Redis 读取缓存。** 本地单用户使用，不是多租户服务；工具执行仍在本机，没有 Docker 执行沙箱。
 
-详细记录见 [2026-10-29 工程现状](docs/engineering-status-2026-10-29.md)。
+当前实现、检查结果与限制见 [V0.4 状态报告](docs/v0.4/status.md)。V0.3 和早期实验文档保留为历史记录，不作为当前启动说明。
 
-V0.3 当前操作见 [工作台使用指南](docs/v0.3/workbench-guide.md)，完整进度和剩余项见 [阶段版本报告](docs/v0.3/version-report.md)。
+## 已有能力
 
-2026-11-02 源码快照的完整回归及页面核对见 [验收记录](docs/v0.3/final-acceptance.md)；11 月 3 日恢复增量的相关检查见 [执行恢复](docs/v0.3/execution-recovery.md)。提交范围、已知限制和待验收项见 [V0.3 收尾清单](docs/v0.3/closeout.md)。当前处于提交前收尾，尚未发布。
+- **任务入口**：简化表单使用“本机路径 + 任务描述”，支持 Git 项目、子目录、普通目录和单文件；可选只读分析。高级表单保留阅读、修复和小功能三类契约。
+- **执行方式**：简化入口默认直接修改目标、50 步、不执行测试；Git 目标也可选固定 commit 的独立 worktree。完整契约未指定模式时沿用 worktree。普通目录和单文件的非 Git 目标使用直接模式。
+- **持久调度**：API 入队，独立 Worker 进程执行；默认 3 个线程槽位。重复提交同一轮不创建重复调度，相同根目录的直接任务串行执行。Worker 中断后保留材料并标记待核实，不自动续跑或重试。
+- **修改与交付**：快照编辑核对文件哈希；直接模式保存执行前基线和执行后哈希，支持冲突检查后的显式撤回。结果分别展示模型停止原因、需求完成状态、实际检查和范围审查。
+- **任务管理**：删除到回收站、恢复及二次确认后的彻底删除。删除记录不撤回源码修改；永久删除会清除该轮材料和经核对的专属 worktree。
+- **缓存与开发**：可选 Redis 读取缓存、PostgreSQL 连接池；API/Worker 支持开发自动重载，Worker 等待在途任务交付后重启。
+- **固定实验**：保留 G/R/P 修复流程与独立验收。历史 browser-use #5998、pydantic-ai #10525 两项已知答案实验有本机独立通过记录，不代表一般成功率或上游贡献。
 
-命令行统一入口：`python -m repo_agent.task_cli`，通过本地服务管理网页中的同一份需求和轮次，见 [CLI 用法](docs/v0.3/task-cli.md)。原直接执行 CLI 保留兼容。
+详细操作见 [任务创建与回收站](docs/simple-tasks.md)、[Worker 与撤回](docs/worker-pool.md)、[数据库](docs/database-tasks.md)和 [Redis 缓存](docs/redis-cache.md)。
 
-## V0.3 当前进展：网页任务、Agent 执行与实验历史
+## 启动工作台
 
-本地网页已支持普通任务保存、独立工作副本准备、显式启动 Agent、查看执行反馈、代码差异与固定最终检查。任务记录使用 JSON 文件持久化，可从“普通任务记录”重新打开。普通任务最终检查与范围审查不等于独立验收。
-
-browser-use #5998、pydantic-ai #10525 已接入项目、需求和历次运行浏览；需求页可单独确认启动新轮次，复用既有 Spec/Runner 的 G/R/P 和独立验收流程。用户启动的 pydantic-ai 轮次 `20261102-153009_fdeb5c70` 已有独立验收通过报告，5 个冻结目标均通过，见 [网页实验记录](docs/v0.3/experiment-start-verification.md)。这不代表两个网页实验均已完成真实验收。
-
-普通任务现支持阅读代码、修复 Bug 和补充小功能。阅读任务禁止编辑，通过 Agent 总结交付分析；另外两类在允许路径内编辑，结果分别展示修改、固定检查和总结。三类均使用相同的任务记录入口。
-
-达到步数上限后进入收尾，保留过程、修改和未完成项；常规落盘失败时尽量保存终止凭据，明确部分交付。遗留占用提供后端核实后的人工解除，保留旧记录，不自动重跑。恢复增量尚待用户选择时间加载，代码校验不替换运行中的服务。
-
-在根目录运行 `python -m repo_agent.task_http --port 4176 --workspace-root experiments/tasks`，打开 [本地工作台](http://127.0.0.1:4176)。启动服务不会调用模型；在页面确认执行会使用本机已配置的模型。新克隆需按 [运行说明](docs/v0.3/runbook.md)配置本机项目与环境，历史实验材料不会随 Git 克隆。详见 [V0.3 文档入口](docs/v0.3/README.md)、[实验接口](docs/v0.3/history-api.md)和[网页实验启动检查](docs/v0.3/experiment-start-verification.md)。
-
-工作台新建普通需求已采用“项目 → 需求 → 多轮运行”：记录写入 `runs/<taskKey>/run_<轮次ID>`，副本归入 `experiments/<project>/workspaces/`，与固定实验沿用相同目录层次。已有 `runs/tasks` 和 `experiments/tasks` 记录原位兼容，不自动迁移。详见 [普通需求与多轮运行](docs/v0.3/ordinary-rounds-api.md)。三类任务的真实演示与全版验收仍未全部完成。
-
-## 当前系统
-
-- **模型决策**：使用 OpenAI-compatible Chat Completions 原生 `tools` / `tool_calls`，校验工具名、参数和调用数量；不执行普通回复中的 JSON。
-- **仓库操作**：在指定工作副本中列文件、搜索、读取和编辑。`read_file` 返回快照；`replace_lines` 核对原文件 SHA256 后生成并检查补丁，避免覆盖读取后发生的改动。
-- **测试反馈**：工具运行固定形式的 pytest 命令，把结果反馈给模型；失败后可继续修复，受步数预算限制。
-- **独立验收**：固定历史版本 G、冻结回归补丁 R；导出仅包含允许业务文件的 P，在另一个全新 G+R 副本中重放并测试。模型 `finish` 不算独立成功。
-- **运行证据**：保留轨迹、候选补丁、文件哈希、测试完整输出、环境元数据和终止原因；新入口还保存允许范围内的 Agent 磁盘源码快照及测试日志。
-- **工程兼容**：每命令 Git 长路径支持、Windows 长文件清单读取、统一轮次 ID、中文摘要与历史路径映射。
-
-| 已知答案实验 | 代表轮模型 | 修复前 G+R | 新副本 G+R+P |
-| --- | --- | --- | --- |
-| browser-use #5998：keyword-only action 参数 | `gpt-6-luna`，13 步 | 目标失败，1 项控制通过 | 2 项固定目标均通过 |
-| pydantic-ai #10525：`python -O` 下非对象 JSON 参数 | `gpt-6-luna`，12 步 | 优化模式目标失败，4 项控制通过 | 5 项固定目标均通过 |
-
-#10525 本机另有一轮独立通过记录；这些选择性实验不构成成功率统计。browser-use 的旧轮没有后续新增的 Agent 源码归档，不事后补造该证据。
-
-## 先运行离线示例
-
-要求：Agent 使用 Python **3.11+**、Git；目标仓库使用各自的依赖环境。以下命令在项目根目录运行：
+要求 Python 3.11+、Git、可用的 PostgreSQL 数据库；Redis 可选。目标项目的测试依赖需要单独准备。以下命令在项目根目录执行。
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install pytest
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m examples.offline_smoke
-```
-
-离线示例使用脚本模型和临时合成仓库，不调用真实 API。项目自身测试与目标仓库的缺陷复现是两类证据。
-
-## 配置真实模型
-
-本仓库提供 [.env.example](.env.example)，不提供密钥或可直接使用的本机 `.env`。
-
-```powershell
+.venv/Scripts/python.exe -m pip install -r requirements.txt
 if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
 ```
 
-手动填写对应配置：
+在本机 `.env` 配置：
 
-- `LLM_PROVIDER=openai_compatible`。
-- `LLM_PROFILE=gpt` 或 `qwen`，选择对应的 `GPT_MODEL/BASE_URL/API_KEY` 或 `QWEN_MODEL/BASE_URL/API_KEY`。
-- profile 是配置分组名，具体模型由 `*_MODEL` 决定。选中分组后，缺项不会借用另一分组。
-- 配置优先级：显式构造参数、进程环境变量、项目 `.env`。未选择 profile 时兼容 `LLM_*` 等旧配置。
+- `DATABASE_URL`：已创建数据库的连接地址，API 和 Worker 必需。连接用户需具备建表与读写权限。
+- `LLM_PROVIDER=openai_compatible`、`LLM_PROFILE=gpt` 或 `qwen`，以及对应分组的 `MODEL`、`BASE_URL`、`API_KEY`。实际模型以配置为准，profile 只是分组标签；选中分组缺项不会借用另一分组。
+- `REDIS_URL`：可选读取缓存；不使用时留空。Redis 不是任务队列，调度事实保存在 PostgreSQL。
 
-服务需要支持原生工具调用。传输层仅对部分 TLS EOF、超时和连接中断进行最多两次额外重试；HTTP 错误（包括 429）、证书校验失败和无效响应不会自动重试。请求重试不会重新执行本地工具。
+分别在两个终端启动：
 
-真实实验需先准备目标源码、冻结 R 和独立环境，再按手册运行；这些命令会调用模型或执行仓库测试：
+```powershell
+# 终端一：API，本文统一使用 4176，匹配任务 CLI 的默认端口
+.venv/Scripts/python.exe -m repo_agent.backend.app --port 4176
+```
 
-- [browser-use 实验手册](docs/experiment-01-runbook.md)
-- [pydantic-ai 实验手册](docs/experiment-02-runbook.md)
+```powershell
+# 终端二：独立 Worker，默认 3 个执行槽位
+.venv/Scripts/python.exe -m repo_agent.backend.worker --workers 3
+```
 
-Git worktree 只隔离文件。`--allow-tests` 或实验入口会执行仓库中的 Python，当前没有 Docker 执行沙箱。
+打开 [本地工作台](http://127.0.0.1:4176)，填写路径和描述，保存后显式提交执行。仅保存需求不调用模型；Worker 启动后会领取数据库中已有的排队任务，可能随即调用模型。直接模式会修改你选择的本机目标，隔离模式需先准备 worktree。
 
-## 代码与记录
+API 不传 `--port` 时默认 **4173**，任务 CLI 默认 **4176**；使用其他端口时需在 CLI 子命令前传相同的 `--port`。API 与 Worker 的自定义数据、项目、运行和副本目录必须一致。
+
+```powershell
+.venv/Scripts/python.exe -m repo_agent.cli.task_cli --port 4176 list
+```
+
+简化路径入口会自动登记本机目标，不要求预先手写项目配置。已有项目配置继续兼容。原 `repo_agent.task_http`、`repo_agent.task_cli` 和 `repo_agent.import_task_history` 命令保留为薄入口；直接执行 CLI `python -m repo_agent` 继续兼容，不经过网页队列。
+
+开发时可给 API 和 Worker 加 `--reload`。它不会立即中断在途任务，适用于本机开发；详细行为见 [Worker 文档](docs/worker-pool.md)。
+
+## 检查与结果如何理解
+
+简化任务默认不运行测试。需要检查时，在高级设置中明确开启并提供检查目标；当前检查工具执行 pytest，不自动推断任意语言的构建或测试命令。
+
+模型 `finish`、`completion.status`、检查通过及独立验收是不同结论。修改类任务无成功编辑时直接宣称完成会被反馈要求继续；“已有代码满足”“受阻”“未完成”须附说明。该规则改善交付记录，不保证需求一定实现。
+
+离线示例与测试使用合成仓库或注入模型：
+
+```powershell
+.venv/Scripts/python.exe -m pip install pytest
+.venv/Scripts/python.exe -m examples.offline_smoke
+.venv/Scripts/python.exe -m pytest tests -q
+node --test frontend/tests/task-ui.test.cjs
+```
+
+Node.js 仅用于前端检查，工作台静态页面无需 npm 构建。真实 PostgreSQL/Redis 集成测试需显式配置专用测试环境变量，见 [数据库测试](docs/database-tasks.md)和 [Worker 测试](docs/worker-pool.md)；跳过这些测试不等于真实集成通过。本轮检查范围见 [V0.4 状态报告](docs/v0.4/status.md)。
+
+## 代码与材料
 
 | 位置 | 职责 |
 | --- | --- |
-| `repo_agent/agent.py`、`provider.py`、`decisions.py` | 决策循环、模型请求、工具协议与校验 |
-| `repo_agent/tools.py`、`workspace.py` | 仓库工具、快照编辑、定向测试、独立工作副本 |
-| `repo_agent/experiments.py`、`experiment_runner.py` | 固定 G+R 准备、认领与完整流程编排 |
-| `repo_agent/experiment_artifacts.py`、`experiment_verify.py` | 导出 P、完整性检查、新副本独立验收 |
-| `repo_agent/run_evidence.py` | Agent 磁盘源码证据与源码漂移检查 |
-| `repo_agent/round_layout.py`、`path_migrations.py` | 统一命名、中文摘要、旧路径解析 |
-| `examples/fixtures/` | 受版本管理的权威回归补丁 R |
-| `tests/` | 合成仓库、模拟模型及框架行为的离线测试 |
+| `repo_agent/backend/` | HTTP、服务、任务仓储、契约与 Worker 入口 |
+| `repo_agent/core/` | Agent 循环、Provider、工具、工作副本 |
+| `repo_agent/experimentation/` | 固定版本准备、补丁导出与独立验收 |
+| `repo_agent/infrastructure/` | 文件操作、锁、缓存、重载、路径解析和源码证据 |
+| `repo_agent/cli/` | 任务客户端与显式历史导入 |
+| `frontend/` | 本机工作台页面及前端检查 |
+| `examples/fixtures/` | 受版本管理的冻结回归补丁 |
+| `tests/` | 离线检查及可选外部服务集成测试 |
 
-本机记录按轮次保存：
+任务按“项目 → 需求 → 多轮运行”组织。新运行材料通常位于 `runs/<taskKey>/run_<ID>/`，Git 副本位于 `experiments/<project>/workspaces/`；旧目录兼容读取。数据库保存任务、调度和回收站状态，日志、Diff、直接修改基线等仍有文件材料。历史导入是显式操作，不会随正常启动迁移全部旧材料。
 
-```text
-runs/<experiment>/run_<北京时间ID>/
-  summary.md
-  experiment.json
-  repair/
-  verify-01/
-experiments/<project>/workspaces/
-  <issue>_<ID>_agent/
-  <issue>_<ID>_verify-01/
-```
+**`.env`、`runs/`、`experiments/` 和虚拟环境被 Git 忽略。** 上传源码与文档不等于备份数据库、工作副本、模型轨迹或完整实验材料；新克隆不自带本机历史。直接修改目标本身不因删除任务记录而回滚。
 
-单独准备使用 `prepare_<ID>`；重复验收追加 `verify-02` 等。各 Issue 的本机 `INDEX.md` 用于导航，具体命名和迁移规则见 [目录说明](docs/experiment-layout.md)。
+## 文档导航与下一阶段
 
-**`runs/`、`experiments/` 和 `.env` 被 Git 忽略。** 本次文档记录了本机实验结论及 G/R/P 校验信息，上传源码和文档不等于上传完整原始日志、模型轨迹、环境或工作副本。新克隆不会自带这些材料。
+- [V0.4 状态与收尾](docs/v0.4/status.md)、[后端结构](docs/backend-structure.md)
+- [MVP 0.2 历史实验](docs/engineering-status-2026-10-29.md)、[V0.3 历史记录](docs/v0.3/README.md)
+- [browser-use 实验手册](docs/experiment-01-runbook.md)、[pydantic-ai 实验手册](docs/experiment-02-runbook.md)
 
-## 下一步
-
-- Docker 沙箱与执行资源限制。
-- API 调用、上下文和工具反馈的效率测量。
-- 更多 Issue、失败案例和多次运行评测，形成明确分母与可比较指标。
-- 依赖环境复建、跨机器补丁重放、上下文压缩与更精确的代码检索。
-
-
-## 代码结构
-
-普通任务启动现已通过 PostgreSQL 持久入队，由独立 Worker 执行。API 与 Worker 需分别启动，默认并发 3 轮，见 [Worker 池运行说明](docs/worker-pool.md)。
-
-后端入口为 `repo_agent/backend/app.py`，目录职责见 [后端结构](docs/backend-structure.md)。
-
-```text
-repo_agent/
-├── backend/
-│   ├── app.py           # 应用组装、配置与启动
-│   ├── routers/         # HTTP 路由、请求解析和响应
-│   ├── services/        # 任务创建、准备、执行等业务流程
-│   ├── repositories/    # PostgreSQL、JSON 和历史材料读写
-│   └── schemas/         # 任务契约、字段校验和错误结构
-├── core/                # Agent 循环、模型提供方、工具与工作副本
-├── experimentation/     # 修复实验准备、执行、补丁导出与独立验收
-├── infrastructure/      # 文件锁、JSON、脱敏、路径解析和源码证据
-└── cli/                 # 命令行客户端与历史导入
-```
-
-`python -m repo_agent.backend.app` 启动后端。原 `python -m repo_agent.task_http`、`repo_agent.task_cli` 和 `repo_agent.import_task_history` 命令保留为薄入口。
+后续优先补充受控执行环境、任务停止/恢复策略、真实需求交付评测和调用成本测量。当前不宣称已支持安全沙箱、模型断点续跑、通用修复成功率、跨机器完整复现或多租户部署。

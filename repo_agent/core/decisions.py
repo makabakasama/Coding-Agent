@@ -40,6 +40,8 @@ TOOL_DEFINITIONS = [
     }, []),
     _tool("finish", "End the run with a summary, actual test results, and unverified items.", {
         "answer": {"type": "string"},
+        "outcome": {"type": "string", "enum": ["completed", "already_satisfied", "blocked", "incomplete"]},
+        "evidence": {"type": "string", "maxLength": 4000},
     }, ["answer"]),
 ]
 # Existing local/offline callers can still use these helpers. They are not
@@ -75,6 +77,8 @@ def _validate(action: str, args: dict) -> None:
         expected = str if spec["type"] == "string" else int
         if type(value) is not expected:
             raise ValueError(f"{action}.{name} must be {spec['type']}")
+        if 'enum' in spec and value not in spec['enum']:
+            raise ValueError(f'{action}.{name} is not an allowed value')
         if isinstance(value, str):
             if len(value) < spec.get("minLength", 0) or len(value) > spec.get("maxLength", float("inf")):
                 raise ValueError(f"{action}.{name} has invalid length")

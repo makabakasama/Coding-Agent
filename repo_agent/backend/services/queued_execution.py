@@ -3,6 +3,8 @@ import subprocess
 from repo_agent.backend.schemas.task_contract import TaskError
 from repo_agent.backend.services.task_execution import git
 
+_UNSET = object()
+
 
 class QueuedExecution:
     def __init__(self, execution, queue):
@@ -14,7 +16,7 @@ class QueuedExecution:
     def _readiness(self, task):
         try:
             workspace, _ = self.execution._workspace(task)
-            if git(workspace, 'status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=all'):
+            if task['contract'].get('workspaceMode') != 'direct' and git(workspace, 'status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=all'):
                 return 'WORKSPACE_DIRTY'
             if self.execution._owner():
                 return 'EXECUTION_UNRESOLVED'
@@ -24,9 +26,9 @@ class QueuedExecution:
         except (OSError, ValueError, subprocess.SubprocessError):
             return 'WORKSPACE_UNAVAILABLE'
 
-    def get(self, task_id, *, check_readiness=True):
+    def get(self, task_id, *, check_readiness=True, fresh=False, queue_status=_UNSET):
         task = self.execution.store.get(task_id)
-        queued = self.queue.get(task_id)
+        queued = self.queue.get(task_id, fresh=fresh) if queue_status is _UNSET else queue_status
         if queued is None:
             with self.execution._io():
                 state = self.execution._read_state(task_id)
@@ -57,12 +59,18 @@ class QueuedExecution:
     def start(self, task_id, value):
         if type(value) is not dict or value:
             raise TaskError(400, 'VALIDATION_ERROR', '启动请求须为空 JSON 对象')
-        state = self.get(task_id)
+        self.execution.store.assert_active(task_id)
+        state = self.get(task_id, fresh=True)
         if state['status'] != 'not_started':
             return 200, state
         if not state['canStart']:
             raise TaskError(409, state['startBlockReason'], '任务当前不可入队')
-        self.queue.enqueue(task_id)
+        import hashlib
+        task = self.execution.store.get(task_id)
+        source = self.execution.projects.repository(task['contract']['projectId'], task['contract']['baseCommit'])
+        repository_key = hashlib.sha256(str(source).casefold().encode()).hexdigest()
+        self.queue.enqueue(task_id, repository_key=repository_key,
+                           workspace_mode=task['contract'].get('workspaceMode', 'worktree'))
         return 202, self.get(task_id)
 
     def recovery(self, task_id, value=None):

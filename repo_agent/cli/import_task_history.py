@@ -97,6 +97,10 @@ def import_history(store, root):
                              ON CONFLICT(task_key,round_id) DO UPDATE SET record=EXCLUDED.record''',
                              (key, identifier, store._json(view)))
                 counts['experiment_rounds'] += 1
+    for path in runs.rglob('task.json'):
+        value = load_json(path.read_bytes())
+        if value.get('recordType') == 'actual':
+            store.invalidate_run(value['taskId'])
     return counts
 
 
@@ -108,8 +112,12 @@ def main():
     if not url:
         parser.error('DATABASE_URL is required')
     root = args.root.resolve()
-    store = DatabaseTaskStore(root / 'runs/tasks', root / 'runs', root / 'experiments', url)
-    print(import_history(store, root))
+    redis_url = os.environ.get('REDIS_URL') or read_dotenv().get('REDIS_URL')
+    store = DatabaseTaskStore(root / 'runs/tasks', root / 'runs', root / 'experiments', url, redis_url=redis_url)
+    try:
+        print(import_history(store, root))
+    finally:
+        store.close()
 
 
 if __name__ == '__main__':

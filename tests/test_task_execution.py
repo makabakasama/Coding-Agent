@@ -17,7 +17,8 @@ from repo_agent.backend.repositories.task_store import TaskStore
 
 class ScriptedModel:
     def __init__(self, decisions=None):
-        self.decisions = list(decisions or [Decision("finish", {"answer": "offline finish"})])
+        self.decisions = list(decisions or [Decision("finish", {"answer": "offline finish",
+            "outcome":"incomplete","evidence":"Synthetic no-op model verifies execution plumbing only"})])
 
     def decide(self, messages):
         return self.decisions.pop(0)
@@ -376,6 +377,26 @@ class ExecutionTest(unittest.TestCase):
         self.assertEqual('partial', self.service.execution.result(task_id)['delivery']['status'])
         self.assertEqual('save_delivery_state', diagnostic['errors'][0]['stage'])
         self.assertIn('synthetic delivery state failure', diagnostic['errors'][0]['message'])
+
+    def test_recording_failure_after_edit_retains_actual_agent_progress(self):
+        from repo_agent.backend.services.task_execution import RecordedAgent
+        self.service = self.service_for(lambda: ScriptedModel([
+            Decision('replace_text', {'path':'calc.py','old_text':'return a - b','new_text':'return a + b'}),
+            Decision('finish', {'answer':'done'}),
+        ]))
+        task_id = self.task(allowTests=False, checkTargets=[])
+        original = RecordedAgent._record
+        def record(agent, item):
+            original(agent, item)
+            if item['type'] == 'observation' and item['action'] == 'replace_text':
+                raise PermissionError('synthetic state recording failure')
+        with patch.object(RecordedAgent, '_record', record):
+            self.service.execution.start(task_id, {})
+            result = self.finish(task_id)
+        self.assertEqual('execution_error', result['stopReason'])
+        self.assertEqual('error', result['agent']['status'])
+        self.assertEqual(1, result['agent']['steps'])
+        self.assertIn('calc.py', result['review']['changedPaths'])
 
     def test_factory_exception_and_result_storage_failure_are_retained(self):
         def broken_factory():

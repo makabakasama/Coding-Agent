@@ -17,7 +17,7 @@ class Model(Protocol):
 
 class Agent:
     def __init__(self, model: Model, tools: RepoTools, *, trace_dir: Path,
-                 max_steps: int = 12):
+                 max_steps: int = 50):
         if not 1 <= max_steps <= 50:
             raise ValueError("max_steps must be in 1..50")
         self.model = model
@@ -77,11 +77,27 @@ class Agent:
                           "tool_call_id": decision.tool_call_id})
             if action == "finish":
                 answer = args["answer"]
+                implementation = getattr(self.tools, 'contract', {}).get('kind') in ('fix_bug', 'add_feature')
+                outcome = args.get('outcome', 'completed')
+                evidence = args.get('evidence', '').strip()
+                if implementation and applied_patches == 0 and (outcome == 'completed' or not evidence):
+                    feedback = {'ok': False, 'error':
+                        'No successful code edit has been observed for this implementation task. '
+                        'Continue implementing the authorized change. If code already satisfies the request, '
+                        'finish with outcome=already_satisfied and evidence naming inspected paths and behavior. '
+                        'If blocked or incomplete, use that outcome and state the concrete blocker or remaining work. '
+                        'Tests being disabled does not prevent authorized edits. Do not manufacture an edit to finish.'}
+                    self._record({'type': 'finish_rejected', 'step': step, 'reason': 'NO_IMPLEMENTATION_EVIDENCE'})
+                    messages.append(decision.assistant_message)
+                    messages.append(decision.feedback_message(feedback))
+                    continue
                 # 'finished' is agent reported, not automatic proof of correctness.
                 verified_local_change = applied_patches > 0 and last_test_passed is True
                 self._record({"type": "finish", "answer": answer, "last_test_passed": last_test_passed,
+                              "outcome": outcome, "evidence": evidence,
                               "verified_local_change": verified_local_change})
                 return {"status": "agent_reported_finished", "answer": answer,
+                        "outcome": outcome, "evidence": evidence,
                         "steps": step, "tool_actions": actions, "last_test_passed": last_test_passed,
                         "verified_local_change": verified_local_change,
                         "trace": str(self.trace_path)}

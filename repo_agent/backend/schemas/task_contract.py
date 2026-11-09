@@ -55,7 +55,7 @@ def validate_contract(value) -> dict:
     if not isinstance(value, dict):
         raise TaskError(400, "VALIDATION_ERROR", "任务必须是 JSON 对象")
     required = {"projectId", "revision", "current", "expected", "allowedPaths", "allowTests", "checkTargets"}
-    allowed = required | {"kind", "maxSteps"}
+    allowed = required | {"kind", "maxSteps", "workspaceMode", "sourceKind", "targetFile"}
     errors = []
 
     def error(field, message):
@@ -79,10 +79,24 @@ def validate_contract(value) -> dict:
         if key == "revision" and (text.startswith("-") or _controls(text)):
             error(key, "版本引用格式不正确")
         result[key] = text
+    if 'sourceKind' in value:
+        result['sourceKind'] = value['sourceKind']
+        if value['sourceKind'] not in ('git','directory'):
+            error('sourceKind','目标类型无效')
+        if value['sourceKind']=='directory' and value.get('workspaceMode')!='direct':
+            error('workspaceMode','普通目录使用直接模式')
+    if 'targetFile' in value:
+        result['targetFile'] = value['targetFile']
+        if not isinstance(value['targetFile'],str) or not _relative_path(value['targetFile']):
+            error('targetFile','目标文件路径无效')
+    if 'workspaceMode' in value:
+        result['workspaceMode'] = value['workspaceMode']
+        if value['workspaceMode'] not in ('worktree', 'direct'):
+            error('workspaceMode', '须为 worktree 或 direct')
     result["kind"] = value.get("kind", "fix_bug")
     if result["kind"] not in ("read_code", "fix_bug", "add_feature"):
         error("kind", "须为 read_code、fix_bug 或 add_feature")
-    result["maxSteps"] = value.get("maxSteps", 12)
+    result["maxSteps"] = value.get("maxSteps", 50)
     if type(result["maxSteps"]) is not int or not 1 <= result["maxSteps"] <= 50:
         error("maxSteps", "必须是 1–50 的整数")
     result["allowTests"] = value.get("allowTests")
@@ -101,7 +115,7 @@ def validate_contract(value) -> dict:
             entry = entry.strip()
             valid = 1 <= len(entry) <= length
             if key == "allowedPaths":
-                valid = valid and _relative_path(entry)
+                valid = valid and (entry == "." or _relative_path(entry))
             else:
                 path, *nodes = entry.split("::")
                 valid = (valid and _relative_path(path)
@@ -136,11 +150,11 @@ def validate_record(record, task_id: str) -> None:
             raise ValueError("Invalid timestamp")
         datetime.fromisoformat(stamp[:-1] + "+00:00")
         contract = record["contract"]
-        if type(contract) is not dict or set(contract) != {
+        if type(contract) is not dict or set(contract) - {"workspaceMode", "sourceKind", "targetFile"} != {
                 "projectId", "requestedRevision", "baseCommit", "kind", "current", "expected",
                 "allowedPaths", "allowTests", "checkTargets", "maxSteps"}:
             raise ValueError("Invalid contract")
-        if type(contract["baseCommit"]) is not str or not COMMIT.fullmatch(contract["baseCommit"]):
+        if not (contract.get("sourceKind") == "directory" and contract["baseCommit"] is None) and (type(contract["baseCommit"]) is not str or not COMMIT.fullmatch(contract["baseCommit"])):
             raise ValueError("Invalid commit")
         request = {k: v for k, v in contract.items() if k not in ("baseCommit", "requestedRevision")}
         request["revision"] = contract["requestedRevision"]

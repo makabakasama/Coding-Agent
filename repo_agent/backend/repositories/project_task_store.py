@@ -87,23 +87,39 @@ class ProjectTaskStore(TaskStore):
         except OSError as exc:
             raise TaskError(503, "STORAGE_UNAVAILABLE", "需求或轮次保存失败，保留已有材料") from exc
 
-    def latest(self):
-        records = super().latest()
+    def latest(self, *, deleted=False):
+        records = super().latest(deleted=deleted)
+        deleted_ids = self.deleted_ids()
         for parent, _ in self._requirements():
             for path in parent.glob("run_*/task.json"):
                 value = read_json(path)
-                records.append(self.get(value["taskId"]))
+                if not self.purge_path(value['taskId']).exists() and (value['taskId'] in deleted_ids) == deleted:
+                    records.append(self.get(value["taskId"]))
         records.sort(key=lambda r: (r["createdAt"], r["taskId"]), reverse=True)
         return records[:50]
 
     def requirements(self, project):
         return [value for _, value in self._requirements() if value["projectId"] == project]
 
+    def hidden_requirements(self, project):
+        deleted_ids = self.deleted_ids()
+        hidden = set()
+        for parent, value in self._requirements():
+            if value['projectId'] != project:
+                continue
+            task_ids = {read_json(path)['taskId'] for path in parent.glob('run_*/task.json')}
+            if task_ids and task_ids <= deleted_ids:
+                hidden.add(value['taskKey'])
+        return hidden
+
     def rounds(self, project, key):
         parent, _ = self.requirement(project, key)
         result = []
+        deleted_ids = self.deleted_ids()
         for path in parent.glob("run_*/task.json"):
             record = read_json(path)
+            if record['taskId'] in deleted_ids or self.purge_path(record['taskId']).exists():
+                continue
             validate_record(record, record["taskId"])
             info = read_json(path.parent / "round.json")
             result.append({"roundId": info["round_id"], "runTaskId": record["taskId"],

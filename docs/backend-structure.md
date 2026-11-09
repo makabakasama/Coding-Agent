@@ -2,6 +2,8 @@
 
 从 `repo_agent/backend/app.py` 开始阅读。这里读取配置，选择存储实现，组装 `TaskService`，创建 HTTP 服务。
 
+仓储通过 `infrastructure/redis_cache.py` 缓存固定任务与历史材料，调度写入使用 PostgreSQL。配置及故障回退规则见 [Redis 缓存](redis-cache.md)。
+
 普通任务执行通过持久队列与独立 Worker 解耦。`backend/worker.py` 启动默认 3 槽位的执行池，调度状态由 `repositories/task_queue.py` 保存，API 入队由 `services/queued_execution.py` 处理，运行方式见 [Worker 池](worker-pool.md)。
 
 | 目录 | 职责 | 主要入口 |

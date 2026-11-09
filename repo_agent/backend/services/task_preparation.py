@@ -126,10 +126,15 @@ class TaskPreparation:
 
     def query(self, task_id, *, prepare=False):
         task = self.store.get(task_id)
+        if task['contract'].get('workspaceMode') == 'direct' and type(self) is TaskPreparation:
+            from repo_agent.backend.services.direct_execution import DirectPreparation
+            return DirectPreparation(self.store, self.projects, self.workspace_root).query(task_id, prepare=prepare)
         directory = self._path(self.store.directory(task_id) / "preparation")
         lock = self._path(directory.parent / "preparation.lock")
         try:
             with exclusive(lock) as acquired:
+                if prepare:
+                    self.store.assert_active(task_id)
                 if not acquired:
                     return self._read(directory, task_id)
                 if directory.exists():

@@ -10,9 +10,12 @@ class DatabaseTaskHistory(TaskHistory):
 
     def _stored_bytes(self, path):
         relative = path.relative_to(self.root).as_posix()
-        with self.store._connection() as conn:
-            row = conn.execute('SELECT content FROM historical_materials WHERE path=%s', (relative,)).fetchone()
-        return bytes(row[0]) if row is not None else None
+        def load():
+            with self.store._connection() as conn:
+                row = conn.execute('SELECT content FROM historical_materials WHERE path=%s', (relative,)).fetchone()
+            return bytes(row[0]) if row is not None else None
+        cache = getattr(self.store, 'cache', None)
+        return cache.binary('history:' + relative, load) if cache else load()
 
     def _artifact_available(self, path):
         return self._stored_bytes(path) is not None or super()._artifact_available(path)

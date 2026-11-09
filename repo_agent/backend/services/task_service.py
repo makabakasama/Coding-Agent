@@ -15,6 +15,9 @@ from repo_agent.backend.services.experiment_runs import ExperimentRuns
 
 
 class TaskService:
+    def close(self):
+        self.store.close()
+
     def __init__(self, store: TaskStore, projects: TaskProjects, *, workspace_root=None,
                  model_factory=None, project_root=None, experiment_runner_factory=None):
         self.store, self.projects = store, projects
@@ -30,6 +33,12 @@ class TaskService:
             self.history = DatabaseTaskHistory(root, store)
             self.execution = QueuedExecution(self.execution, TaskQueue(store))
         self.experiments = ExperimentRuns(root, store, self.history, runner_factory=experiment_runner_factory)
+        from repo_agent.backend.services.task_undo import TaskUndo
+        self.undo = TaskUndo(self.execution)
+        from repo_agent.backend.services.task_lifecycle import TaskLifecycle
+        self.lifecycle = TaskLifecycle(store, self.execution)
+        from repo_agent.backend.services.task_purge import TaskPurge
+        self.purge = TaskPurge(store, self.execution, root)
 
     def prepare(self, task_id, value):
         if type(value) is not dict or value:
@@ -37,7 +46,13 @@ class TaskService:
         return self.preparation.query(task_id, prepare=True)
 
     def create(self, value, *, requirement=None) -> dict:
+        if isinstance(value,dict) and 'instruction' in value:
+            from repo_agent.backend.services.simple_submission import SimpleSubmission
+            value = SimpleSubmission(self.projects).normalize(value)
         contract = validate_contract(value)
+        configured = self.projects._projects().get(contract['projectId'])
+        if configured and contract.get('sourceKind','git') != configured.get('sourceKind','git'):
+            raise TaskError(400,'INVALID_TARGET_TYPE','目标类型与本机登记不一致')
         commit = self.projects.resolve(contract["projectId"], contract["revision"])
         contract["requestedRevision"] = contract.pop("revision")
         contract["baseCommit"] = commit
@@ -53,7 +68,13 @@ class TaskService:
         if project not in {p["projectId"] for p in self.projects.list()}:
             raise TaskError(404, "TASK_NOT_FOUND", "项目不存在")
         values = self.store.requirements(project) if hasattr(self.store, "requirements") else []
-        return {"tasks": [{**v, "roundCount": len(self.store.rounds(project, v["taskKey"]))} for v in values]}
+        values = sorted(values, key=lambda value: (
+            datetime.fromisoformat(value['createdAt'].replace('Z', '+00:00')), value['taskKey']), reverse=True)
+        counts = self.store.round_counts(project) if hasattr(self.store, 'round_counts') else {}
+        tasks = [{**v, 'roundCount': counts[v['taskKey']] if v['taskKey'] in counts
+                  else len(self.store.rounds(project, v['taskKey']))} for v in values]
+        hidden = self.store.hidden_requirements(project) if hasattr(self.store, 'hidden_requirements') else set()
+        return {'tasks': [task for task in tasks if task['taskKey'] not in hidden]}
 
     def ordinary_task(self, project, key):
         if not hasattr(self.store, "requirement"):
@@ -62,9 +83,13 @@ class TaskService:
         return value
 
     def new_round(self, project, key, value):
-        if type(value) is not dict or value:
-            raise TaskError(400, "VALIDATION_ERROR", "新轮次请求须为空 JSON 对象")
+        if type(value) is not dict or set(value) - {'maxSteps', 'workspaceMode'}:
+            raise TaskError(400, "VALIDATION_ERROR", "新轮次请求只允许指定 maxSteps 和 workspaceMode")
         contract = dict(self.ordinary_task(project, key)["contract"])
+        if 'maxSteps' in value:
+            contract['maxSteps'] = value['maxSteps']
+        if 'workspaceMode' in value:
+            contract['workspaceMode'] = value['workspaceMode']
         contract["revision"] = contract.pop("requestedRevision")
         contract.pop("baseCommit")
         return self.create(contract, requirement=(project, key))
@@ -76,12 +101,25 @@ class TaskService:
     def get(self, task_id: str) -> dict:
         return self.store.get(task_id)
 
-    def list(self) -> list[dict]:
+    def list(self, *, deleted=False) -> list[dict]:
+        cache = getattr(self.store, 'cache', None)
+        if cache:
+            return cache.versioned_json('task-list:' + str(deleted), lambda: self._list(deleted=deleted),
+                                        generation='task-lists', ttl=lambda tasks: 1 if any(
+                                            task['executionStatus'] in ('queued', 'running', 'finalizing')
+                                            for task in tasks) else 30)
+        return self._list(deleted=deleted)
+
+    def _list(self, *, deleted=False):
         tasks = []
-        for record in self.store.latest():
+        records = self.store.latest(deleted=deleted)
+        queue = getattr(self.execution, 'queue', None)
+        statuses = queue.get_many([r['taskId'] for r in records]) if queue else None
+        for record in records:
             task_id = record["taskId"]
             try:
-                status = self.execution.get(task_id, check_readiness=False)["status"]
+                options = {'queue_status': statuses.get(task_id)} if statuses is not None else {}
+                status = self.execution.get(task_id, check_readiness=False, **options)["status"]
             except TaskError:
                 status = "unknown"
             try:
@@ -92,4 +130,10 @@ class TaskService:
             tasks.append({"taskId": task_id, "createdAt": record["createdAt"],
                           "projectId": record["contract"]["projectId"], "current": record["contract"]["current"],
                           "executionStatus": status, "resultAvailable": result_available})
-        return tasks
+        if deleted:
+            for pending in self.store.pending_purges():
+                record = pending['record']
+                tasks.append({'taskId': record['taskId'], 'createdAt': record['createdAt'],
+                              'projectId': record['contract']['projectId'], 'current': record['contract']['current'],
+                              'executionStatus': 'unknown', 'resultAvailable': False, 'purgePending': True})
+        return sorted(tasks, key=lambda task: (task['createdAt'], task['taskId']), reverse=True)[:50]

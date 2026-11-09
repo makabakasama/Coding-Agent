@@ -83,6 +83,11 @@ class RecordedAgent(Agent):
 
 
 class TaskExecution:
+    def _runtime_paths(self, workspace):
+        paths = {self.store.root, getattr(self.store,'runs_root',self.store.root),
+                 getattr(self.store,'project_workspaces',self.preparation.workspace_root), self.preparation.workspace_root}
+        return tuple(path for path in paths if not workspace.is_relative_to(path))
+
     def __init__(self, store, projects, preparation, *, model_factory=None):
         self.store, self.projects, self.preparation = store, projects, preparation
         self.model_factory = model_factory or OpenAICompatibleProvider
@@ -220,7 +225,16 @@ class TaskExecution:
                 write_json(self._path(self._directory(task_id) / 'recovery.json'), record)
                 return {'owner': expected, 'canRelease': False, 'reason': 'RELEASED', 'released': record}
 
+    def _direct_execution(self):
+        from repo_agent.backend.services.direct_execution import DirectExecution, DirectPreparation
+        preparation = DirectPreparation(self.store, self.projects, self.preparation.workspace_root)
+        execution = DirectExecution(self.store, self.projects, preparation, model_factory=self.model_factory)
+        execution.source = self.source
+        return execution
+
     def _workspace(self, task):
+        if task['contract'].get('workspaceMode') == 'direct' and type(self) is TaskExecution:
+            return self._direct_execution()._workspace(task)
         task_id = task["taskId"]
         if self.preparation.query(task_id)["status"] != "prepared":
             raise TaskError(409, "PREPARATION_REQUIRED", "工作副本尚未准备成功")
@@ -234,7 +248,7 @@ class TaskExecution:
     def _ready(self, task):
         try:
             workspace, identity = self._workspace(task)
-            if git(workspace, "status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=all"):
+            if task["contract"].get("workspaceMode") != "direct" and git(workspace, "status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=all"):
                 return "WORKSPACE_DIRTY", None
             config = self.projects.execution_config(task["contract"]["projectId"])
             # Inspect without contacting a model. Optional configuration is frozen now.
@@ -277,9 +291,15 @@ class TaskExecution:
         if type(value) is not dict or value:
             raise TaskError(400, "VALIDATION_ERROR", "启动请求须为空 JSON 对象")
         task = self.store.get(task_id)
+        if task['contract'].get('workspaceMode') == 'direct' and type(self) is TaskExecution:
+            direct = self._direct_execution()
+            result = direct.start(task_id, value)
+            self.threads.extend(direct.threads)
+            return result
         with self._io():
             if self._directory(task_id).exists():
                 return 200, self.get(task_id)
+            self.store.assert_active(task_id)
             lock = exclusive(self._path(self.store.root / "execution-global.lock"))
             acquired = lock.__enter__()
             handed_over = False
@@ -288,6 +308,7 @@ class TaskExecution:
                     return 200, self._read_state(task_id)
                 if not acquired:
                     raise TaskError(409, "EXECUTION_BUSY", "已有任务正在执行")
+                self.store.assert_active(task_id)
                 if self._owner():
                     raise TaskError(409, "EXECUTION_UNRESOLVED", "旧执行尚未核实，禁止再次启动")
                 reason, context = self._ready(task)
@@ -322,6 +343,8 @@ class TaskExecution:
     def run_claimed(self, task_id, execution_id):
         """Run one durable claim synchronously inside a Worker pool slot."""
         task = self.store.get(task_id)
+        if task['contract'].get('workspaceMode') == 'direct' and type(self) is TaskExecution:
+            return self._direct_execution().run_claimed(task_id, execution_id)
         logger.info('task=%s execution=%s context project=%s kind=%s base_commit=%s',
                     task_id, execution_id, task['contract']['projectId'],
                     task['contract']['kind'], task['contract']['baseCommit'])
@@ -341,6 +364,24 @@ class TaskExecution:
                 # The outer context owns the task lock, including delivery errors.
                 self._worker(task, state, context, nullcontext())
                 return self._read_state(task_id)
+
+    def _patch(self, workspace, task, safe_paths, tools):
+        omitted = []
+        patch = (git(workspace, "diff", "--binary", "--no-ext-diff", "--no-textconv", task["contract"]["baseCommit"], "--", *safe_paths)
+                 if safe_paths else b"")
+        # Include newly created business files; protected files remain on disk,
+        # their hashes/paths are in review rather than copied into public logs.
+        if tools is not None:
+            tracked = set(git(workspace, "ls-files", "-z").decode("utf-8").split("\0"))
+            for relative in sorted(set(safe_paths) - tracked):
+                path = workspace / relative
+                if tools.editable(relative) and path.is_file() and path.stat().st_size <= 800000:
+                    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+                    patch += "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                                    for line in difflib.unified_diff([], lines, fromfile="/dev/null", tofile="b/" + relative)).encode("utf-8")
+                else:
+                    omitted.append(relative)
+        return patch, omitted
 
     def _snapshot(self, workspace):
         result = {}
@@ -429,7 +470,13 @@ class TaskExecution:
                      'summary': redactor.public(agent_result.get('answer', ''))}
             if agent_result.get('reason'):
                 agent['error'] = redactor.public(agent_result['reason'])[:400]
+            completion = agent_result.get('outcome', 'incomplete')
+            if task['contract']['kind'] != 'read_code' and completion == 'completed' and not review['changedPaths']:
+                completion = 'incomplete'
             return {'schemaVersion': 1, 'taskId': task['taskId'], 'executionId': state['executionId'],
+                    'completion': {'status': completion,
+                                   'evidence': redactor.public(agent_result.get('evidence', '')),
+                                   'modelReported': completion == agent_result.get('outcome')},
                     'source': self.source, 'stopReason': stop, 'agent': agent, 'finalChecks': checks,
                     'review': review, 'artifacts': artifacts, 'patchExport': patch_export,
                     'incomplete': incomplete, 'independentlyVerified': False,
@@ -462,7 +509,7 @@ class TaskExecution:
             event({"type": "phase", "phase": "agent"})
             if self.preparation._identity(Path(identity["source"]), workspace) != identity:
                 raise ValueError("Workspace identity changed")
-            if git(workspace, "status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=all"):
+            if task["contract"].get("workspaceMode") != "direct" and git(workspace, "status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=all"):
                 raise ValueError("Workspace became dirty")
             baseline = self._snapshot(workspace)
             if "LINK" in baseline.values():
@@ -472,9 +519,17 @@ class TaskExecution:
                 raise ValueError("Agent source snapshot unavailable or changed")
             test_env = {**config["test_env"], "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": "-p no:cacheprovider",
                         "PYTHONPATH": str(workspace), "PYTHONNOUSERSITE": "1"}
+            test_logs = directory / 'tests'
+            if task['contract'].get('sourceKind') == 'directory' and test_logs.is_relative_to(workspace):
+                import tempfile
+                test_logs = Path(tempfile.gettempdir())/'coding-agent-test-logs'/state['executionId']
+                if test_logs.is_relative_to(workspace):
+                    raise ValueError('Select a narrower source directory so runtime logs remain outside it')
+                write_json(directory/'test-log-location.json', {'directory':str(test_logs)})
             tools = TaskRepoTools(workspace, contract=task["contract"], test_python=config["test_python"],
+                                 excluded_roots=self._runtime_paths(workspace),
                                  test_env=test_env, test_timeout=config["test_timeout"],
-                                 test_log_dir=directory / "tests", test_output_filter=redactor.output, test_junit=True)
+                                 test_log_dir=test_logs, test_output_filter=redactor.output, test_junit=True)
             tools.git_metadata = self._git_metadata(workspace, identity)
             write_json(directory / "runtime.json", {"identity": identity, "testPython": str(config["test_python"]),
                        "testEnv": test_env, "testTimeout": config["test_timeout"], "source": self.source,
@@ -496,7 +551,10 @@ class TaskExecution:
             prompt += "\nOnly edit allowedPaths business code when the task permits editing. Never edit tests/configuration. Only run frozen checkTargets."
             agent = RecordedAgent(model, tools, trace_dir=directory / "trace", max_steps=state["maxSteps"],
                                   recorder=event, redactor=redactor)
+            agent_result = {"status": "error", "steps": 0}
             agent_result = agent.run(prompt)
+            if agent_result.get('outcome') in ('blocked', 'incomplete'):
+                incomplete.append('Agent 声明任务受阻或未完成，详见交付状态及依据')
             write_json(directory / "agent-result.json", json.loads(redactor.private(json.dumps(agent_result, ensure_ascii=False))))
             stop = {"agent_reported_finished": "agent_reported_finished", "step_limit": "step_limit"}.get(agent_result["status"], "agent_error")
             save_state(status="finalizing", phase="final_checks", activity="fixed_checks")
@@ -546,6 +604,8 @@ class TaskExecution:
                 if checks["status"] != "passed":
                     incomplete.append("固定最终检查未全部通过")
         except Exception as exc:
+            if agent_result['status'] == 'error':
+                agent_result.update(steps=state['steps'], reason='Agent 执行中断，详见执行诊断')
             record_error("execute_or_check", exc)
             stop = "execution_error"
             incomplete.append("执行异常，保留已产生材料；结果不代表修复通过")
@@ -581,20 +641,8 @@ class TaskExecution:
                         raise ValueError("Scope evidence unavailable for diff extraction")
                     safe_paths = [p for p in review["changedPaths"] if _relative_path(p) and Path(p).name.lower() not in {"id_rsa", "id_ed25519"}]
                     omitted = sorted(set(review["changedPaths"]) - set(safe_paths))
-                    patch = (git(workspace, "diff", "--binary", "--no-ext-diff", "--no-textconv", task["contract"]["baseCommit"], "--", *safe_paths)
-                             if safe_paths else b"")
-                    # Include newly created business files; protected files remain on disk,
-                    # their hashes/paths are in review rather than copied into public logs.
-                    if tools is not None:
-                        tracked = set(git(workspace, "ls-files", "-z").decode("utf-8").split("\0"))
-                        for relative in sorted(set(safe_paths) - tracked):
-                            path = workspace / relative
-                            if tools.editable(relative) and path.is_file() and path.stat().st_size <= 800000:
-                                lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-                                patch += "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
-                                                for line in difflib.unified_diff([], lines, fromfile="/dev/null", tofile="b/" + relative)).encode("utf-8")
-                            else:
-                                omitted.append(relative)
+                    patch, extra_omitted = self._patch(workspace, task, safe_paths, tools)
+                    omitted.extend(extra_omitted)
                     if any(secret.encode("utf-8") in patch for secret in redactor.secrets):
                         patch_export = {"status": "not_exported", "sha256": None, "bytes": None, "reason": "KNOWN_SECRET_DETECTED"}
                         incomplete.append("补丁含已知密钥，拒绝导出原始补丁；副本保留待审查，网页 diff 已脱敏")
@@ -611,6 +659,9 @@ class TaskExecution:
                     incomplete.append("diff 未能完整保存")
                 if stop != "agent_reported_finished":
                     incomplete.append("Agent 未以正常 finish 完成，停止原因见 stopReason")
+                if (task['contract']['kind'] != 'read_code' and agent_result.get('outcome') == 'completed'
+                        and not review['changedPaths']):
+                    incomplete.append('本轮未保留代码变更，需求完成状态标为未完成')
                 delivery_step = "save_delivery_events"
                 event({"type": "terminated"})
                 event_files = sorted((directory / "events").glob("*.json"))

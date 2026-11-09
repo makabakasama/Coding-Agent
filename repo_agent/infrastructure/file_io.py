@@ -3,6 +3,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import os
+import time
+import uuid
 from repo_agent.backend.schemas.task_contract import load_json
 
 def now():
@@ -43,13 +45,32 @@ def exclusive(path):
 
 
 def write_json(path, value):
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-        json.dump(value, stream, ensure_ascii=False, indent=2)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.replace(path)
+    data = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+    write_bytes(path, data)
+
+
+def write_bytes(path, data):
+    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Windows readers can briefly prevent replacing an open destination.
+        # Retry only replacement, preserving the previous complete JSON meanwhile.
+        for attempt in range(8):
+            try:
+                temporary.replace(path)
+                return
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.01 * 2 ** attempt)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def read_json(path):

@@ -18,7 +18,9 @@ from repo_agent.infrastructure.run_evidence import sha256
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", ".mypy_cache",
              ".pytest_cache", "__pycache__", "dist", "build", ".tox", ".ruff_cache"}
 SKIP_FILES = {".env", ".env.local", "id_rsa", "id_ed25519"}
-TEXT_EXT = {".py", ".toml", ".md", ".txt", ".yaml", ".yml", ".json", ".ini", ".cfg", ".rst"}
+TEXT_EXT = {".py", ".toml", ".md", ".txt", ".yaml", ".yml", ".json", ".ini", ".cfg", ".rst",
+            ".html", ".htm", ".css", ".scss", ".sass", ".less",
+            ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue", ".svelte"}
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,8 @@ class RepoTools:
     def __init__(self, root: Path, *, allow_writes: bool = False,
                  allow_tests: bool = False, test_timeout: int = 90,
                  test_python: Path | None = None, test_env: dict[str, str] | None = None,
-                 test_log_dir: Path | None = None, test_output_filter=None, test_junit: bool = False):
+                 test_log_dir: Path | None = None, test_output_filter=None, test_junit: bool = False,
+                 allow_ignored_test_logs: bool = False):
         self.root = root.expanduser().resolve(strict=True)
         if not self.root.is_dir():
             raise ValueError("Repository root must be a directory")
@@ -59,7 +62,14 @@ class RepoTools:
         self.test_log_dir = test_log_dir.resolve() if test_log_dir is not None else None
         if self.test_log_dir is not None:
             if self.test_log_dir == self.root or self.test_log_dir.is_relative_to(self.root):
-                raise ValueError("Test logs must be outside the tested worktree")
+                ignored = False
+                if allow_ignored_test_logs and self.test_log_dir != self.root:
+                    check = subprocess.run(['git', '-C', str(self.root), 'check-ignore', '--no-index', '-q', '--',
+                                            self.test_log_dir.relative_to(self.root).as_posix()],
+                                           capture_output=True, timeout=15)
+                    ignored = check.returncode == 0
+                if not ignored:
+                    raise ValueError("Test logs must be outside the tested worktree or in a verified ignored direct-mode directory")
             self.test_log_dir.mkdir(parents=True, exist_ok=True)
         self.test_log_records: list[dict] = []
         self._snapshots: dict[str, FileSnapshot] = {}
@@ -81,7 +91,9 @@ class RepoTools:
         count = 0
         for base, dirs, names in os.walk(directory, followlinks=False):
             dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS
-                             and not (Path(base) / d).is_symlink())
+                             and not (Path(base) / d).is_symlink()
+                             and not any((Path(base)/d).resolve().is_relative_to(root)
+                                         for root in getattr(self,'excluded_roots',())))
             for name in sorted(names):
                 path = Path(base) / name
                 if path.is_symlink() or name in SKIP_FILES or name.startswith('.env'):
@@ -98,7 +110,8 @@ class RepoTools:
         if not directory.is_dir():
             raise ValueError("subdir must be a directory")
         paths = [p.relative_to(self.root).as_posix() for p in self._iter_files(directory, 500)]
-        return {"files": paths, "returned": len(paths), "limit": 500}
+        return {"files": paths, "returned": len(paths), "limit": 500,
+                "scope": "supported_text_files", "supported_extensions": sorted(TEXT_EXT)}
 
     def search_code(self, query: str) -> dict:
         if not isinstance(query, str) or not (1 <= len(query) <= 100):

@@ -24,8 +24,10 @@ def protected(path, targets):
 
 
 class TaskRepoTools(RepoTools):
-    def __init__(self, root, *, contract, **kwargs):
-        super().__init__(root, allow_writes=contract["kind"] != "read_code", allow_tests=contract["allowTests"], **kwargs)
+    def __init__(self, root, *, contract, excluded_roots=(), **kwargs):
+        self.excluded_roots = tuple(Path(path).resolve() for path in excluded_roots)
+        super().__init__(root, allow_writes=contract["kind"] != "read_code", allow_tests=contract["allowTests"],
+                         allow_ignored_test_logs=contract.get('workspaceMode') == 'direct', **kwargs)
         self.contract = contract
         self.scopes = [(p, (self.root / p).is_dir()) for p in contract["allowedPaths"]]
 
@@ -33,11 +35,37 @@ class TaskRepoTools(RepoTools):
         if rel != "." and (not isinstance(rel, str) or not _relative_path(rel)):
             raise ValueError("Path is protected or invalid")
         path = super()._path(rel)
+        if any(path.is_relative_to(root) for root in self.excluded_roots):
+            raise ValueError('Execution materials are outside the task source scope')
         if path != self.root / rel or path.name.lower() in {"id_rsa", "id_ed25519"}:
             raise ValueError("Linked or secret path is excluded")
+        target = self.contract.get('targetFile')
+        if target and rel != '.' and rel != target and not (path.is_dir() and target.startswith(rel.rstrip('/')+'/')):
+            raise ValueError('Path is outside the selected file')
         return path
 
     def _iter_files(self, directory, limit=1500):
+        if self.contract.get('targetFile'):
+            path=self._path(self.contract['targetFile'])
+            if path.is_file() and path.is_relative_to(directory):
+                yield path
+            return
+        if self.contract.get('workspaceMode') == 'direct' and self.contract.get('sourceKind') != 'directory':
+            from repo_agent.core.tools import TEXT_EXT
+            listed = subprocess.run(['git', '-C', str(self.root), 'ls-files', '--cached', '--others',
+                                     '--exclude-standard', '-z'], capture_output=True, check=True, timeout=30)
+            count = 0
+            for relative in sorted(set(listed.stdout.decode().split('\0')) - {''}):
+                try:
+                    path = self._path(relative)
+                except ValueError:
+                    continue
+                if path.is_relative_to(directory) and path.is_file() and path.suffix.lower() in TEXT_EXT:
+                    yield path
+                    count += 1
+                    if count >= limit:
+                        break
+            return
         for path in super()._iter_files(directory, limit):
             try:
                 self._path(path.relative_to(self.root).as_posix())
@@ -47,9 +75,16 @@ class TaskRepoTools(RepoTools):
 
     def editable(self, path):
         self._path(path)
+        if self.contract.get('workspaceMode') == 'direct' and self.contract.get('sourceKind') != 'directory':
+            result = subprocess.run(['git', '-C', str(self.root), 'check-ignore', '--no-index', '-q', '--', path],
+                                    capture_output=True, timeout=15)
+            if result.returncode == 0:
+                return False
+            if result.returncode != 1:
+                raise ValueError('Cannot inspect ignored paths')
         return (self.contract["kind"] != "read_code"
                 and not protected(path, self.contract["checkTargets"])
-                and any(path == scope or directory and path.startswith(scope + "/") for scope, directory in self.scopes))
+                and any(scope == "." or path == scope or directory and path.startswith(scope + "/") for scope, directory in self.scopes))
 
     def apply_patch(self, patch, *, expected_file=None):
         if not isinstance(patch, str) or len(patch) > 60000:

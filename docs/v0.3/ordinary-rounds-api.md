@@ -1,3 +1,5 @@
+> 历史文档：本页记录 V0.3 当时的实现与检查，保留原结论。当前启动、默认模式及功能状态请以 [V0.4 状态](../v0.4/status.md) 和 [根 README](../../README.md) 为准。
+
 # 普通需求与多轮运行
 
 2026-11-02 增量。采用现有 `runs/<taskKey>/`、`experiments/<project>/workspaces/` 布局，不移动旧材料。

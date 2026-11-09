@@ -27,7 +27,7 @@ class MaterializationTest(unittest.TestCase):
         import psycopg
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with patch('psycopg.connect', side_effect=psycopg.OperationalError('private connection details')):
+            with patch('psycopg_pool.ConnectionPool.connection', side_effect=psycopg.OperationalError('private connection details')):
                 with self.assertRaises(TaskError) as error:
                     DatabaseTaskStore(root / 'data', root / 'runs', root / 'workspaces', 'unused')
             self.assertEqual('DATABASE_UNAVAILABLE', error.exception.code)
@@ -52,11 +52,45 @@ class MaterializationTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('CODING_AGENT_TEST_DATABASE_URL'), 'Dedicated test database not configured')
 class PostgreSQLTest(unittest.TestCase):
+    def test_pool_reuses_connection_resets_autocommit_and_rolls_back(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = DatabaseTaskStore(root/'data', root/'runs', root/'workspaces',
+                                      os.environ['CODING_AGENT_TEST_DATABASE_URL'])
+            self.addCleanup(store.close)
+            store.pool.resize(min_size=1, max_size=1)
+            with store._connection() as conn:
+                first_pid = conn.execute('SELECT pg_backend_pid()').fetchone()[0]
+                conn.execute('CREATE TEMP TABLE pool_rollback_check (value integer)')
+            with self.assertRaises(RuntimeError):
+                with store._connection() as conn:
+                    self.assertEqual(first_pid, conn.execute('SELECT pg_backend_pid()').fetchone()[0])
+                    conn.execute('INSERT INTO pool_rollback_check VALUES (1)')
+                    raise RuntimeError('Injected transaction failure')
+            with store._connection() as conn:
+                self.assertEqual(0, conn.execute('SELECT count(*) FROM pool_rollback_check').fetchone()[0])
+            with store._connection() as conn:
+                conn.autocommit = True
+            with store._connection() as conn:
+                self.assertFalse(conn.autocommit)
+                self.assertEqual(first_pid, conn.execute('SELECT pg_backend_pid()').fetchone()[0])
+            with store._connection():
+                with patch.object(store, '_connect', side_effect=lambda: store.pool.connection(timeout=.01)):
+                    with self.assertRaises(TaskError) as error:
+                        with store._connection():
+                            self.fail('Pool should be exhausted')
+                self.assertEqual('DATABASE_UNAVAILABLE', error.exception.code)
+            store.close()
+            with self.assertRaises(TaskError):
+                with store._connection():
+                    self.fail('Pool should be closed')
+
     def test_create_restart_second_round_and_file_recovery(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             args = (root / 'data', root / 'runs', root / 'workspaces', os.environ['CODING_AGENT_TEST_DATABASE_URL'])
             store = DatabaseTaskStore(*args)
+            self.addCleanup(store.close)
             keys = []
             try:
                 first = store.create(record)
@@ -64,6 +98,7 @@ class PostgreSQLTest(unittest.TestCase):
                 keys.append(requirement['taskKey'])
                 second = store.create(record, requirement=('sample', keys[0]))
                 restarted = DatabaseTaskStore(*args)
+                self.addCleanup(restarted.close)
                 self.assertEqual(first, restarted.get(first['taskId']))
                 self.assertEqual(2, len(restarted.rounds('sample', keys[0])))
                 path = restarted.directory(second['taskId']) / 'task.json'

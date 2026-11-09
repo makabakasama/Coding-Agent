@@ -79,6 +79,27 @@ class TaskHandler(BaseHTTPRequestHandler):
     def _dispatch(self):
         self._local_request()
         path = urlsplit(self.path).path
+        purge = re.fullmatch(r'/api/tasks/([^/]+)/purge', path)
+        if purge:
+            if self.command not in ('GET', 'POST'):
+                raise TaskError(405, 'METHOD_NOT_ALLOWED', '彻底删除接口支持 GET 和 POST')
+            value = (self.service.purge.get(purge[1]) if self.command == 'GET'
+                     else self.service.purge.apply(purge[1], self._body()))
+            self._json(200, value)
+            return
+        lifecycle = re.fullmatch(r'/api/tasks/([^/]+)/lifecycle', path)
+        if lifecycle:
+            if self.command not in ('GET', 'POST'):
+                raise TaskError(405, 'METHOD_NOT_ALLOWED', '本轮删除状态接口支持 GET 和 POST')
+            value = (self.service.lifecycle.get(lifecycle[1]) if self.command == 'GET'
+                     else self.service.lifecycle.change(lifecycle[1], self._body()))
+            self._json(200, value)
+            return
+        if path == '/api/trash':
+            if self.command != 'GET':
+                raise TaskError(405, 'METHOD_NOT_ALLOWED', '回收站仅支持读取')
+            self._json(200, {'tasks': self.service.list(deleted=True)})
+            return
         diagnostics = re.fullmatch(r"/api/tasks/([^/]+)/preparation/diagnostics", path)
         if diagnostics:
             if self.command != "GET":
@@ -153,10 +174,10 @@ class TaskHandler(BaseHTTPRequestHandler):
                     body = {"verifications": body["verifications"]}
             self._json(200, body)
             return
-        execution = re.fullmatch(r"/api/tasks/([^/]+)/execution(?:/(events|result|diagnostics|recovery|artifacts/([^/]+)))?", path)
+        execution = re.fullmatch(r"/api/tasks/([^/]+)/execution(?:/(events|result|diagnostics|recovery|undo|artifacts/([^/]+)))?", path)
         if execution:
             task_id, part, identifier = execution.groups()
-            allowed = "GET, POST" if part in (None, 'recovery') else "GET"
+            allowed = "GET, POST" if part in (None, 'recovery', 'undo') else "GET"
             if self.command not in allowed.split(", "):
                 self._json(405, TaskError(405, "METHOD_NOT_ALLOWED", "该接口不支持此方法").response(), {"Allow": allowed})
                 return
@@ -177,6 +198,8 @@ class TaskHandler(BaseHTTPRequestHandler):
                 status, body = 200, self.service.execution.diagnostics(task_id)
             elif part == 'recovery':
                 status, body = 200, self.service.execution.recovery(task_id, self._body() if self.command == 'POST' else None)
+            elif part == 'undo':
+                status, body = 200, self.service.undo.apply(task_id, self._body()) if self.command == 'POST' else self.service.undo.get(task_id)
             else:
                 status, body = 200, self.service.execution.artifact(task_id, identifier, int(query.get("offset", ["0"])[0]), limit)
             self._json(status, body)
@@ -242,6 +265,8 @@ class TaskHandler(BaseHTTPRequestHandler):
 
 
 class TaskHTTPServer(ThreadingHTTPServer):
+    # Reload waits for in-flight task saves and worktree preparation to return.
+    daemon_threads = False
     # Windows otherwise permits two HTTP servers to bind the same port, so a
     # successful bind can still send the browser to an old static server.
     allow_reuse_address = False

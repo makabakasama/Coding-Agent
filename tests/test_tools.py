@@ -38,6 +38,35 @@ class ToolsTest(unittest.TestCase):
         self.assertTrue(self.tools.search_code("return a - b")["matches"])
         self.assertIn("return a - b", self.tools.read_file("calc.py")["content"])
 
+    def test_frontend_files_are_visible_searchable_readable_and_editable(self):
+        from repo_agent.backend.services.task_execution_tools import TaskRepoTools
+        frontend = self.repo / 'frontend'
+        frontend.mkdir()
+        names = ['index.html', 'page.htm', 'styles.css', 'theme.scss', 'theme.sass', 'theme.less',
+                 'app.js', 'component.jsx', 'module.mjs', 'test.cjs', 'app.ts', 'view.tsx',
+                 'component.vue', 'component.svelte']
+        for name in names:
+            (frontend / name).write_text('frontend_marker = 12\n', encoding='utf-8')
+        (frontend / '.env.local.js').write_text('private_marker', encoding='utf-8')
+        (frontend / 'node_modules').mkdir()
+        (frontend / 'node_modules/vendor.js').write_text('private_marker', encoding='utf-8')
+        contract = {'kind': 'add_feature', 'allowedPaths': ['frontend'],
+                    'allowTests': False, 'checkTargets': []}
+        tools = TaskRepoTools(self.repo, contract=contract)
+        listing = tools.list_files('frontend')
+        self.assertEqual('supported_text_files', listing['scope'])
+        self.assertIn('.js', listing['supported_extensions'])
+        self.assertEqual({'frontend/' + name for name in names}, set(listing['files']))
+        self.assertEqual(len(names), len(tools.search_code('frontend_marker')['matches']))
+        self.assertEqual([], tools.search_code('private_marker')['matches'])
+        for name in names:
+            with self.subTest(name=name):
+                path = 'frontend/' + name
+                self.assertIn('frontend_marker', tools.read_file(path)['content'])
+                self.assertTrue(tools.replace_text(path, 'frontend_marker = 12', 'frontend_marker = 20')['applied'])
+        with self.assertRaises(ValueError):
+            tools.read_file('frontend/.env.local.js')
+
     def test_prevent_escape(self):
         with self.assertRaises(ValueError):
             self.tools.read_file("../outside.py")
