@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any
 import uuid
 
@@ -17,19 +18,28 @@ def _tool(name: str, description: str, properties: dict, required: list[str]) ->
 
 
 TOOL_DEFINITIONS = [
-    _tool("list_files", "List text files inside the repository.", {
+    _tool("list_files", "List a page of visible text files. Continue with next_cursor while has_more; complete refers only to the declared visible scope.", {
         "subdir": {"type": "string", "minLength": 1, "default": "."},
+        "cursor": {"type": "string", "maxLength": 64, "default": ""},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 500},
     }, []),
     
-    _tool("search_code", "Search repository text for a literal substring.", {
+    _tool("search_code", "Search visible text in a directory or file for a case-insensitive literal substring. Returns page matches, cumulative matched_lines_total, and scan_complete. Continue with next_cursor when has_more.", {
         "query": {"type": "string", "minLength": 1, "maxLength": 100},
+        "path": {"type": "string", "minLength": 1, "default": "."},
+        "cursor": {"type": "string", "maxLength": 64, "default": ""},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
     }, ["query"]),
     _tool("read_file", "Read at most 201 inclusive lines. Returns snapshot_id, whole-file sha256, and actual displayed start/end.", {
         "path": {"type": "string", "minLength": 1},
         "start": {"type": "integer", "minimum": 1, "default": 1},
         "end": {"type": "integer", "minimum": 1, "default": 160},
     }, ["path"]),
-    _tool("replace_lines", "Replace complete displayed lines using a read_file snapshot. Rejects any file version change. Reread after each edit.", {
+    _tool("create_file", "Create a new UTF-8 text file in the authorized scope, including missing ordinary parent directories. Never overwrites an existing path.", {
+        "path": {"type": "string", "minLength": 1},
+        "content": {"type": "string", "maxLength": 60000},
+    }, ["path", "content"]),
+    _tool("replace_lines", "Replace complete displayed lines using a read_file snapshot. For an empty file use start=end=1. Rejects any file version change. Reread after each edit.", {
         "snapshot_id": {"type": "string", "minLength": 1, "maxLength": 64},
         "start": {"type": "integer", "minimum": 1},
         "end": {"type": "integer", "minimum": 1},
@@ -38,6 +48,21 @@ TOOL_DEFINITIONS = [
     _tool("run_tests", "Execute focused pytest tests and return their actual results.", {
         "target": {"type": "string", "minLength": 1, "maxLength": 220, "default": "."},
     }, []),
+    _tool("update_plan", "Create or revise up to eight model-reported steps. Keep existing IDs/goals. Reference observation_id values from actual tools; a checked step still requires delivery review.", {
+        "steps": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "id": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"},
+                "goal": {"type": "string", "minLength": 1, "maxLength": 300},
+                "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "blocked"]},
+                "evidence_refs": {"type": "array", "maxItems": 8, "items": {
+                    "type": "string", "minLength": 1, "maxLength": 64}},
+                "blocked_reason": {"type": "string", "maxLength": 1000},
+            },
+            "required": ["id", "goal", "status", "evidence_refs", "blocked_reason"],
+        }},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+    }, ["steps", "reason"]),
     _tool("finish", "End the run with a summary, actual test results, and unverified items.", {
         "answer": {"type": "string"},
         "outcome": {"type": "string", "enum": ["completed", "already_satisfied", "blocked", "incomplete"]},
@@ -57,33 +82,99 @@ _LEGACY_TOOL_DEFINITIONS = [
     }, ["patch"]),
 ]
 _NATIVE_TOOL_NAMES = {tool["function"]["name"] for tool in TOOL_DEFINITIONS}
-_PARAMETERS = {tool["function"]["name"]: tool["function"]["parameters"]
+CHECK_REVIEW_SCHEMA = {
+    'type': 'object', 'additionalProperties': False,
+    'properties': {
+        'purpose': {'type': 'string', 'enum': ['regression', 'control']},
+        'criteria': {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': {
+            'type': 'object', 'additionalProperties': False,
+            'properties': {
+                'requirement': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
+                'scenario': {'type': 'string', 'minLength': 1, 'maxLength': 500},
+                'expected': {'type': 'string', 'minLength': 1, 'maxLength': 500},
+                'expected_quote': {'type': 'string', 'minLength': 1, 'maxLength': 500,
+                                   'description': 'Exact expected value or text supported by the task or cited repository.'},
+                'expected_basis': {'type': 'string', 'enum': ['task', 'repository', 'assumption']},
+                'gap_id': {'type': 'string', 'minLength': 1, 'maxLength': 64},
+                'dimension': {'type': 'string', 'enum': ['example', 'boundary', 'composition', 'compatibility']},
+                'oracle_conflict': {'type': 'object', 'additionalProperties': False, 'properties': {
+                    'reference': {'type': 'integer', 'minimum': 1, 'maximum': 4,
+                                  'description': 'One-based index into evidence for the frozen repository expectation.'},
+                    'assessment': {'type': 'string', 'minLength': 1, 'maxLength': 500,
+                                   'description': 'Compare the task quote and old expectation, including compatibility and uncertainty.'},
+                }, 'required': ['reference', 'assessment']},
+                'evidence': {'type': 'array', 'maxItems': 4, 'items': {
+                    'type': 'object', 'additionalProperties': False,
+                    'properties': {
+                        'path': {'type': 'string', 'minLength': 1, 'maxLength': 220},
+                        'start_line': {'type': 'integer', 'minimum': 1},
+                        'end_line': {'type': 'integer', 'minimum': 1},
+                        'quote': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
+                    },
+                    'required': ['path', 'start_line', 'end_line', 'quote'],
+                }},
+                'start_line': {'type': 'integer', 'minimum': 1},
+                'end_line': {'type': 'integer', 'minimum': 1},
+            },
+            'required': ['requirement', 'scenario', 'expected', 'expected_basis',
+                         'start_line', 'end_line'],
+        }},
+        'gaps': {'type': 'array', 'maxItems': 4, 'description': 'Unverified key scenarios, most important first.',
+                 'items': {'type': 'object', 'additionalProperties': False, 'properties': {
+                     'id': {'type': 'string', 'minLength': 1, 'maxLength': 64},
+                     'requirement': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
+                     'scenario': {'type': 'string', 'minLength': 1, 'maxLength': 500},
+                     'verification_goal': {'type': 'string', 'minLength': 1, 'maxLength': 500},
+                 }, 'required': ['id', 'requirement', 'scenario', 'verification_goal']}},
+        'assumptions': {'type': 'string', 'maxLength': 1000},
+    },
+    'required': ['purpose', 'criteria', 'assumptions'],
+}
+_PARAMETERS = {tool["function"]["name"]: deepcopy(tool["function"]["parameters"])
                for tool in TOOL_DEFINITIONS + _LEGACY_TOOL_DEFINITIONS}
+# The evaluation provider advertises this optional extension. Ordinary providers
+# keep their existing schema; native decisions still share one validator.
+_PARAMETERS['run_tests']['properties']['review'] = CHECK_REVIEW_SCHEMA
+INDEPENDENT_CHECK_TARGETS = {'type': 'array', 'minItems': 1, 'maxItems': 2,
+                             'items': {'type': 'string', 'minLength': 1, 'maxLength': 220}}
+_PARAMETERS['run_tests']['properties']['independent_targets'] = INDEPENDENT_CHECK_TARGETS
+
+
+def _validate_value(spec: dict, value: Any, label: str) -> None:
+    expected = {"string": str, "integer": int, "object": dict, "array": list}[spec["type"]]
+    if type(value) is not expected:
+        raise ValueError(f"{label} must be {spec['type']}")
+    if 'enum' in spec and value not in spec['enum']:
+        raise ValueError(f'{label} is not an allowed value')
+    if isinstance(value, dict):
+        if set(spec.get('required', [])) - value.keys():
+            raise ValueError(f'Missing required arguments for {label}')
+        properties = spec['properties']
+        if value.keys() - properties.keys():
+            raise ValueError(f'Unexpected arguments for {label}')
+        for key, item in value.items():
+            _validate_value(properties[key], item, f'{label}.{key}')
+    elif isinstance(value, list):
+        if not spec.get('minItems', 0) <= len(value) <= spec.get('maxItems', float('inf')):
+            raise ValueError(f'{label} has invalid item count')
+        for index, item in enumerate(value):
+            _validate_value(spec['items'], item, f'{label}[{index}]')
+    elif isinstance(value, str):
+        if not spec.get('minLength', 0) <= len(value) <= spec.get('maxLength', float('inf')):
+            raise ValueError(f'{label} has invalid length')
+        if 'pattern' in spec and not re.fullmatch(spec['pattern'], value):
+            raise ValueError(f'{label} has invalid format')
+    elif not spec.get('minimum', float('-inf')) <= value <= spec.get('maximum', float('inf')):
+        raise ValueError(f'{label} is outside its allowed range')
 
 
 def _validate(action: str, args: dict) -> None:
-    """Validate the flat string/integer schemas used by this MVP."""
+    """Validate declared parameters, including nested step arrays."""
     if not isinstance(action, str) or action not in _PARAMETERS:
         raise ValueError("Unknown tool name")
     if not isinstance(args, dict):
         raise ValueError("Tool arguments must be an object")
-    schema = _PARAMETERS[action]
-    if set(schema["required"]) - args.keys():
-        raise ValueError(f"Missing required arguments for {action}")
-    if args.keys() - schema["properties"].keys():
-        raise ValueError(f"Unexpected arguments for {action}")
-    for name, value in args.items():
-        spec = schema["properties"][name]
-        expected = str if spec["type"] == "string" else int
-        if type(value) is not expected:
-            raise ValueError(f"{action}.{name} must be {spec['type']}")
-        if 'enum' in spec and value not in spec['enum']:
-            raise ValueError(f'{action}.{name} is not an allowed value')
-        if isinstance(value, str):
-            if len(value) < spec.get("minLength", 0) or len(value) > spec.get("maxLength", float("inf")):
-                raise ValueError(f"{action}.{name} has invalid length")
-        elif value < spec.get("minimum", float("-inf")):
-            raise ValueError(f"{action}.{name} is below its minimum")
+    _validate_value(_PARAMETERS[action], args, action)
     if action in ("read_file", "replace_lines"):
         start, end = args.get("start", 1), args.get("end", 160)
         if end < start or end - start > 200:
@@ -124,9 +215,9 @@ class DecisionError(ValueError):
         super().__init__(reason)
         self.message = deepcopy(message)
 
-    def feedback_messages(self) -> list[dict]:
+    def feedback_messages(self, *, hint: str | None = None) -> list[dict]:
         observation = {"ok": False, "error": str(self),
-                       "hint": "Call exactly one declared function; use finish to end the run."}
+                       "hint": hint or "Call exactly one declared function; use finish to end the run."}
         message = self.message if isinstance(self.message, dict) else {}
         calls = message.get("tool_calls")
         if message.get("role") == "assistant" and isinstance(calls, list) and calls:

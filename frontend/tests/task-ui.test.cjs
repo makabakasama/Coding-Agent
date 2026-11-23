@@ -13,6 +13,7 @@ function harness(fetch){
  for(const id of ['#purge-review','#purge-summary','#confirm-purge','#cancel-purge','#task-purge-0','#task-purge-1','#task-lifecycle-1','#task-reconcile-0','#task-reconcile-1','#task-lifecycle-0','#task-lifecycle-message','#delete-review','#delete-summary','#confirm-delete','#cancel-delete','#query-execution-diagnostics','#execution-diagnostics','#query-execution-recovery','#execution-recovery-status','#release-execution-owner'])nodes.set(id,node());
  const simple=node();simple.elements=Object.fromEntries(['targetPath','projectId','instruction','kind','workspaceMode','maxSteps','revision','expected','allowedPaths','allowTests','checkTargets'].map(k=>[k,node()]));simple.elements.kind.value='add_feature';simple.elements.workspaceMode.value='direct';simple.elements.maxSteps.value='50';nodes.set('#simple-task',simple);
  const app=node(), location={hash:''};const context=vm.createContext({app,location,fetch,document:{querySelector:s=>nodes.get(s)},heading:()=>'',contract:()=>'',escape:s=>String(s),console,Intl,Date,setTimeout:()=>1,clearTimeout:()=>{}});vm.runInContext(block,context);
+ for(const id of ['#browse-target','#target-picker','#picker-cancel','#picker-up','#picker-error','#picker-directory','#picker-entries','#picker-path','#picker-note'])nodes.set(id,node());
  return {context,nodes,form,app,location,run:s=>vm.runInContext(s,context)};
 }
 const ok=data=>({ok:true,status:200,json:async()=>data});
@@ -105,6 +106,22 @@ test('observation renders actual feedback and latest summary without inventing m
 test('all skipped result preserves skipped counts and exit zero does not mean passed',async()=>{const counts={total:3,passed:0,failed:0,errors:0,skipped:3};const r={...resultRecord,finalChecks:{status:'skipped',counts,targets:['test_a.py'],reason:'ALL_TESTS_SKIPPED',checks:[{target:'test_a.py',status:'skipped',exitCode:0,timedOut:false,counts,reason:'ALL_TESTS_SKIPPED'}]}};const h=harness(async(url)=>url.endsWith('/result')?ok(r):url.includes('/events?')?ok(emptyEvents):ok(ended));execPanel(h);await tick();const html=h.nodes.get('#result-content').innerHTML;assert.match(html,/固定最终检查<strong>跳过/);assert.match(html,/跳过 3/);assert.match(html,/ALL_TESTS_SKIPPED/);assert.doesNotMatch(html,/固定最终检查<strong>通过/);});
 test('unknown or contradictory check counts cannot render an unsupported pass',async()=>{for(const counts of [null,{total:2,passed:0,failed:0,errors:0,skipped:2},{total:3,passed:1,failed:0,errors:0,skipped:1}]){const r={...resultRecord,finalChecks:{status:'passed',counts,targets:['test_a.py'],reason:'TEST_COUNTS_UNAVAILABLE',checks:[{target:'test_a.py',status:'passed',exitCode:0,timedOut:false,counts,reason:'TEST_COUNTS_UNAVAILABLE'}]}};const h=harness(async(url)=>url.endsWith('/result')?ok(r):url.includes('/events?')?ok(emptyEvents):ok(ended));execPanel(h);await tick();assert.match(h.nodes.get('#result-content').innerHTML,/无法核验（接口报告通过/);assert.doesNotMatch(h.nodes.get('#result-content').innerHTML,/固定最终检查<strong>通过/);}});
 test('mixed passed and skipped counts remain visible and absent feedback stays absent',async()=>{const h=harness(async()=>ok(executionState));assert.match(h.run(`countsText(${JSON.stringify({total:3,passed:2,failed:0,errors:0,skipped:1})})`),/通过 2.*跳过 1/);assert.equal(h.run(`checkLabel(${JSON.stringify({status:'passed',counts:{total:3,passed:2,failed:0,errors:0,skipped:1}})})`),'通过');assert.match(h.run('feedbackHTML(undefined)'),/未提供/);assert.match(h.run('countsText(null)'),/不是 0/);});
+test('discovery feedback displays incomplete search scope and cumulative evidence',async()=>{
+ const h=harness(async()=>ok(executionState));
+ const feedback={kind:'search_code',status:'partial',message:'本次结果覆盖不完整',scope:'supported_text_files',scopePath:'src',returned:0,scanComplete:false,stopReason:'file_limit',scannedFiles:1500,matchedLinesTotal:4,skippedCounts:{too_large:1,read_errors:0},hasMore:true};
+ const html=h.run(`feedbackHTML(${JSON.stringify(feedback)})`);
+ assert.match(html,/查询范围<\/dt><dd>src/);
+ assert.match(html,/扫描完整<\/dt><dd>否/);
+ assert.match(html,/停止原因<\/dt><dd>file_limit/);
+ assert.match(html,/本页扫描文件<\/dt><dd>1500/);
+ assert.match(html,/累计匹配行<\/dt><dd>4/);
+ assert.match(html,/too_large=1/);
+ assert.match(html,/可继续查询<\/dt><dd>是/);
+ assert.match(html,/返回数量<\/dt><dd>0/);
+ assert.doesNotMatch(html,/未找到/);
+ const legacy=h.run(`feedbackHTML(${JSON.stringify({kind:'search_code',returned:0})})`);
+ assert.doesNotMatch(legacy,/扫描完整|累计匹配行|可继续查询/);
+});
 test('artifact pagination appends text, retains offset after read error, and preserves redaction limits',async()=>{const urls=[];let secondCalls=0;const h=harness(async(url)=>{urls.push(url);if(url.endsWith('/result'))return ok(resultRecord);if(url.includes('/events?'))return ok(emptyEvents);if(url.includes('/artifacts/')){if(url.includes('offset=0&'))return ok({artifactId:'diff',kind:'diff',content:'first',offset:0,nextOffset:5,totalChars:11,hasMore:true,redacted:true,truncated:false});if(secondCalls++===0)return {ok:false,json:async()=>({error:{code:'STORAGE_UNAVAILABLE',message:'材料无法读取',fields:[]}})};return ok({artifactId:'diff',kind:'diff',content:'second',offset:5,nextOffset:11,totalChars:11,hasMore:false,redacted:true,truncated:false})}return ok(ended)});execPanel(h);await tick();await h.nodes.get('#artifact-load-0').onclick();assert.equal(h.nodes.get('#artifact-text-0').textContent,'first');await h.nodes.get('#artifact-load-0').onclick();assert.match(h.nodes.get('#artifact-note-0').textContent,/不视作空输出/);await h.nodes.get('#artifact-load-0').onclick();assert.equal(h.nodes.get('#artifact-text-0').textContent,'firstsecond');assert.equal(urls.filter(u=>u.includes('offset=5&')).length,2);});
 test('local patch export evidence never becomes an independent verification claim',async()=>{const r={...resultRecord,patchExport:{status:'not_exported',sha256:null,bytes:null,reason:'KNOWN_SECRET_DETECTED'},review:{...resultRecord.review,status:'failed',outOfScopePaths:['tests/a.py']}};const h=harness(async(url)=>url.endsWith('/result')?ok(r):url.includes('/events?')?ok(emptyEvents):ok(ended));execPanel(h);await tick();const html=h.nodes.get('#result-content').innerHTML;assert.match(html,/KNOWN_SECRET_DETECTED/);assert.match(html,/交付范围审查<strong>失败/);assert.match(html,/不证明可重放或独立验收/);assert.match(html,/未导出/);});
 
@@ -293,6 +310,14 @@ test('completion outcome is visible separately from model finish and checks',asy
  assert.match(h.nodes.get('#result-content').innerHTML,/Control is still hardcoded/);
 });
 
+test('completed model report keeps needs_review and the remaining behavioral gaps visible',async()=>{
+ const result={...resultRecord,completion:{status:'completed',modelReported:true},execution_status:'agent_reported_finished',acceptance_status:'needs_review',remaining_gaps:[{scenario:'Independent branches',verification_goal:'Preserve each branch order'}]};
+ const h=harness(async(url)=>url.includes('/events?')?ok(emptyEvents):url.endsWith('/result')?ok(result):ok(ended));
+ execPanel(h);await tick();await tick();
+ const html=h.nodes.get('#result-content').innerHTML;
+ assert.match(html,/待审查/);assert.match(html,/模型报告已完成/);assert.match(html,/Independent branches/);assert.match(html,/Preserve each branch order/);
+});
+
 
 test('optimistic delete removes the row before the server replies and avoids list refetch',async()=>{
  let resolve;
@@ -397,6 +422,22 @@ test('permanent deletion requires a second confirmation and removes the row opti
  resolve(ok({taskId:record.taskId,purged:true,status:'purged'}));await deleting;
  assert.equal(calls.length,2);
  assert.match(h.nodes.get('#task-lifecycle-message').textContent,/已彻底删除/);
+});
+
+test('saved progress shows model claims, stale checks, blocking and decision budget',()=>{
+ const h=harness(async()=>ok({}));
+ const progress={revision:2,current_step_id:null,steps:[
+  {id:'check',goal:'Verify parser',status:'completed',evidence_refs:['obs_old'],blocked_reason:''},
+  {id:'delivery',goal:'Deliver caller',status:'blocked',evidence_refs:[],blocked_reason:'Caller is unresolved'}
+ ],evidence:[{id:'obs_old',action:'run_tests',passed:true,ok:true}],stale_evidence_refs:['obs_old']};
+ const budget={used_decisions:9,max_decisions:20,remaining_decisions:11,remaining_includes_current:true};
+ const html=h.run(`progressHTML(${JSON.stringify(progress)},${JSON.stringify(budget)})`);
+ assert.match(html,/模型声明完成/);
+ assert.match(html,/检查通过/);
+ assert.match(html,/后续编辑过期/);
+ assert.match(html,/Caller is unresolved/);
+ assert.match(html,/剩余 11（包含本次决策）/);
+ assert.match(h.run('progressHTML(undefined,undefined)'),/步骤记录未提供/);
 });
 
 test('partial permanent deletion offers a retry and keeps restoration disabled',async()=>{

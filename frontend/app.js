@@ -46,10 +46,50 @@ function validRecord(r) {
 }
 function task() {
  const epoch=pageEpoch, active=()=>pageEpoch===epoch;
- app.innerHTML=heading('NEW TASK','创建任务','选择本机目标，描述你希望完成的事情。')+`<form id="simple-task"><section class="card"><label>目标文件或目录<input name="targetPath" placeholder="例如 E:\\Projects\\MyApp 或 E:\\Projects\\MyApp\\app.py"><span class="hint">填写运行后端这台电脑上的路径，支持 Git 仓库、普通目录和单个文件。</span></label><label>或选择已有项目<select name="projectId"><option value="">可选，直接填写路径即可</option></select></label><label>任务描述<textarea name="instruction" required maxlength="4000" placeholder="例如：给新建任务表单增加可编辑的最大执行步数，默认 50。"></textarea></label><label>任务方式<select name="kind"><option value="add_feature">修改代码</option><option value="read_code">只读分析</option><option value="fix_bug">修复问题</option></select></label><details><summary>高级设置（可选）</summary><label>执行方式<select name="workspaceMode"><option value="direct">直接修改当前文件</option><option value="worktree">Git 隔离副本</option></select></label><label>步数上限<input name="maxSteps" type="number" min="1" max="50" step="1" value="50"></label><label>Git 版本<input name="revision" placeholder="默认 HEAD；普通文件使用当前内容"></label><label>额外验收说明<textarea name="expected" maxlength="4000" placeholder="可选，默认按任务描述完成并报告结果"></textarea></label><label>修改范围<textarea name="allowedPaths" placeholder="可选，每行一个相对路径；默认仅所选文件或目录"></textarea></label><label class="check"><input name="allowTests" type="checkbox">允许运行指定检查</label><label>检查目标<textarea name="checkTargets" placeholder="可选，仅在允许运行检查时填写 pytest 目标"></textarea></label><p><a href="#advanced-task">打开完整契约表单</a></p></details><p id="simple-error" role="alert"></p><button id="preview-simple">预览并保存</button></section></form><dialog id="simple-review"><h2>确认任务</h2><pre id="simple-review-content"></pre><p>保存后可在任务详情提交执行。直接模式会修改所选目标。</p><p id="simple-review-error" role="alert"></p><button id="save-simple">确认保存</button><button id="cancel-simple" class="secondary">返回修改</button></dialog>`;
+ app.innerHTML=heading('NEW TASK','创建任务','选择本机目标，描述你希望完成的事情。')+`<form id="simple-task"><section class="card"><label>目标文件或目录<div class="path-choice"><input name="targetPath" placeholder="点击浏览选择文件或目录"><button type="button" class="secondary" id="browse-target">浏览…</button></div><span class="hint">从工作目录浏览选择，也可填写其他本机路径。</span></label><label>或选择已有项目<select name="projectId"><option value="">可选，选择文件或目录即可</option></select></label><label>任务描述<textarea name="instruction" required maxlength="4000" placeholder="例如：给新建任务表单增加可编辑的最大执行步数，默认 50。"></textarea></label><label>任务方式<select name="kind"><option value="add_feature">修改代码</option><option value="read_code">只读分析</option><option value="fix_bug">修复问题</option></select></label><details><summary>高级设置（可选）</summary><label>执行方式<select name="workspaceMode"><option value="direct">直接修改当前文件</option><option value="worktree">Git 隔离副本</option></select></label><label>步数上限<input name="maxSteps" type="number" min="1" max="50" step="1" value="50"></label><label>Git 版本<input name="revision" placeholder="默认 HEAD；普通文件使用当前内容"></label><label>额外验收说明<textarea name="expected" maxlength="4000" placeholder="可选，默认按任务描述完成并报告结果"></textarea></label><label>修改范围<textarea name="allowedPaths" placeholder="可选，每行一个相对路径；默认仅所选文件或目录"></textarea></label><label class="check"><input name="allowTests" type="checkbox">允许运行指定检查</label><label class="check"><input name="allowTemporaryChecks" type="checkbox">允许在本机运行 Agent 编写的临时 Python 自测</label><label>检查目标<textarea name="checkTargets" placeholder="可选，仅在允许运行检查时填写 pytest 目标"></textarea></label><p><a href="#advanced-task">打开完整契约表单</a></p></details><p id="simple-error" role="alert"></p><button id="preview-simple">预览并保存</button></section></form><dialog id="simple-review"><h2>确认任务</h2><pre id="simple-review-content"></pre><p>保存后可在任务详情提交执行。直接模式会修改所选目标。</p><p id="simple-review-error" role="alert"></p><button id="save-simple">确认保存</button><button id="cancel-simple" class="secondary">返回修改</button></dialog><dialog id="target-picker" aria-label="选择目标文件或目录"><h2>选择目标文件或目录</h2><p id="picker-path" class="hint"></p><div class="actions"><button type="button" class="secondary" id="picker-up">上一级</button><button type="button" id="picker-directory">选择当前目录</button></div><p id="picker-error" role="alert"></p><div id="picker-entries" class="picker-entries"></div><p class="hint" id="picker-note"></p><button type="button" class="secondary" id="picker-cancel">取消</button></dialog>`;
  const form=document.querySelector('#simple-task'),dialog=document.querySelector('#simple-review');
  const save=document.querySelector('#save-simple'),preview=document.querySelector('#preview-simple');
  let payload=null;
+ const picker=document.querySelector('#target-picker');
+ let parentPath=null;
+ async function browse(path) {
+  const entries=document.querySelector('#picker-entries');
+  document.querySelector('#picker-error').textContent='';
+  entries.textContent='正在读取…';
+  try {
+   const url='/api/local-files'+(path?'?path='+encodeURIComponent(path):'');
+   const response=await fetch(url,{cache:'no-store'});
+   const data=await response.json();
+   if(!response.ok)throw Error(errorText(data));
+   if(!active()||!picker.open)return;
+   parentPath=data.parent;
+   document.querySelector('#picker-path').textContent=data.path;
+   document.querySelector('#picker-up').disabled=!parentPath;
+   document.querySelector('#picker-directory').onclick=()=>{form.elements.targetPath.value=data.path;picker.close();};
+   document.querySelector('#picker-note').textContent=data.truncated?'只显示前 500 项，请进入子目录继续选择。':'';
+   entries.replaceChildren();
+   for(const item of data.entries){
+    const row=document.createElement('div');
+    row.className='picker-row';
+    const button=document.createElement('button');
+    button.type='button';button.className='picker-entry';
+    button.textContent=(item.type==='directory'?'📁 ':'📄 ')+item.name;
+    button.onclick=()=>item.type==='directory'?browse(item.path):(form.elements.targetPath.value=item.path,picker.close());
+    row.append(button);
+    if(item.type==='directory'){
+     const select=document.createElement('button');
+     select.type='button';select.className='secondary picker-select';
+     select.textContent='选择此文件夹';
+     select.onclick=()=>{form.elements.targetPath.value=item.path;picker.close();};
+     row.append(select);
+    }
+    entries.append(row);
+   }
+  }catch(error){if(active()&&picker.open){entries.textContent='';document.querySelector('#picker-error').textContent=error.message||'文件夹读取失败';}}
+ }
+ document.querySelector('#browse-target').onclick=()=>{picker.showModal();browse();};
+ document.querySelector('#picker-up').onclick=()=>{if(parentPath)browse(parentPath);};
+ document.querySelector('#picker-cancel').onclick=()=>picker.close();
  const lines=text=>text.split(/\r?\n/).map(value=>value.trim()).filter(Boolean);
  form.onsubmit=event=>{
   event.preventDefault();if(pendingCreate||uncertainCreate)return;
@@ -64,7 +104,8 @@ function task() {
   if(f.expected.value.trim())payload.expected=f.expected.value.trim();
   if(lines(f.allowedPaths.value).length)payload.allowedPaths=lines(f.allowedPaths.value);
   payload.allowTests=f.allowTests.checked;payload.checkTargets=f.allowTests.checked?lines(f.checkTargets.value):[];
-  document.querySelector('#simple-review-content').textContent=`目标：${payload.targetPath||payload.projectId}\n任务：${payload.instruction}\n方式：${payload.workspaceMode==='direct'?'直接修改当前文件':'Git 隔离副本'}\n步数上限：${maxSteps}\n检查：${payload.allowTests?'允许指定检查':'本次不运行测试'}`;
+  if(payload.allowTests && f.kind.value!=='read_code' && f.allowTemporaryChecks.checked)payload.allowTemporaryChecks=true;
+  document.querySelector('#simple-review-content').textContent=`目标：${payload.targetPath||payload.projectId}\n任务：${payload.instruction}\n方式：${payload.workspaceMode==='direct'?'直接修改当前文件':'Git 隔离副本'}\n步数上限：${maxSteps}\n检查：${payload.allowTests?'允许指定检查':'本次不运行测试'}${payload.allowTemporaryChecks?'\n允许在本机执行临时 Python 自测':''}`;
   document.querySelector('#simple-review-error').textContent='';dialog.showModal();
  };
  document.querySelector('#cancel-simple').onclick=()=>{if(!pendingCreate)dialog.close();};
@@ -80,13 +121,13 @@ function task() {
  fetch('/api/projects',{cache:'no-store'}).then(async response=>{
   if(!response.ok)throw Error('项目列表不可用');const data=await response.json();if(!active())return;
   if(!Array.isArray(data.projects))throw Error('项目列表格式异常');
-  form.elements.projectId.innerHTML='<option value="">可选，直接填写路径即可</option>'+data.projects.filter(p=>p.canCreateTask!==false).map(p=>`<option value="${escape(p.projectId)}">${escape(p.name)}</option>`).join('');
+  form.elements.projectId.innerHTML='<option value="">可选，选择文件或目录即可</option>'+data.projects.filter(p=>p.canCreateTask!==false).map(p=>`<option value="${escape(p.projectId)}">${escape(p.name)}</option>`).join('');
  }).catch(()=>{if(active())document.querySelector('#simple-error').textContent='已有项目暂无法加载，仍可填写本机路径创建。';});
 }
 
 function advancedTask() {
  const epoch=pageEpoch;
- app.innerHTML=heading('TASK CONTRACT','选择任务方式','普通任务可编辑约定；已有实验项目使用固定问题和验收流程。')+`<div class="grid"><form id="real-task"><section class="card"><h2>普通任务：目标与起点</h2><label>可创建任务的项目<select name="projectId" required disabled><option value="">正在加载项目…</option></select><span class="hint">固定实验项目显示在右侧，沿用已有 Spec 与独立验收。</span></label><p id="project-state" role="status">正在查询可用项目…</p><button type="button" class="secondary" id="reload-projects">重新加载项目</button><label>执行目录<select name="workspaceMode"><option value="worktree">隔离副本（worktree）</option><option value="direct">直接修改当前仓库</option></select><span class="hint">直接模式读取当前文件，修改会立即出现在项目目录；同一仓库串行执行。</span></label><label>起始版本<input name="revision" required maxlength="160" placeholder="准确 commit 或版本引用，如 main"></label><label>当前行为<textarea name="current" required maxlength="4000"></textarea></label><label>期望行为<textarea name="expected" required maxlength="4000"></textarea></label></section><section class="card"><h2>操作范围与检查</h2><label>允许修改的文件 / 目录<textarea name="scope" required placeholder="每行一项，使用仓库相对路径及 / 分隔符"></textarea></label><label class="check"><input name="allowTests" type="checkbox">允许运行测试</label><label id="real-targets">固定检查目标<textarea name="targets" placeholder="每行一个 pytest 路径或 文件.py::测试节点"></textarea><span class="hint">填写目标，不填写 python / pytest 命令或选项。</span></label><p id="real-no-check" hidden>本次明确暂不检查。</p></section><div id="save-error" class="notice" role="alert" hidden style="white-space:pre-wrap"></div><div class="actions"><button id="preview-real" disabled>预览任务约定 →</button></div></form><div><section class="card"><h2>已有实验项目</h2><p class="hint">选择项目后进入固定需求和历史轮次，再明确确认是否启动新的真实模型实验。</p><div id="experiment-projects"><p>正在读取实验项目…</p></div></section><section class="card"><h2>普通任务保存什么</h2><p>保存目标、允许范围和检查约定，解析并固定准确 commit。隔离模式使用提交快照，直接模式使用当前文件。</p><p class="muted">保存不代表已执行、检查通过或完成独立实验验收。步数预算默认为 50。</p></section><div class="notice">请勿填写密钥。实验项目不接受网页自定义检查命令，使用后端登记源码、环境和冻结 G/R。</div><a href="#demo" class="button secondary">打开独立演示表单</a><p class="hint">演示流程不保存真实任务。</p><p><a class="button secondary" href="#tasks">普通任务记录 →</a></p><a href="#projects" class="button secondary">全部项目实验 →</a></div></div><dialog id="real-review" aria-label="真实任务约定核对"><h2>确认并保存任务</h2><div id="real-review-content"></div><p>保存后固定约定；隔离模式使用提交快照，直接模式使用当前文件。准确 commit 将在保存成功后展示；修改需求须新建任务。</p><div id="review-error" role="alert" style="white-space:pre-wrap"></div><div class="actions"><button id="save-real">确认保存（不启动）</button><button class="secondary" id="edit-real">返回修改</button></div></dialog>`;
+ app.innerHTML=heading('TASK CONTRACT','选择任务方式','普通任务可编辑约定；已有实验项目使用固定问题和验收流程。')+`<div class="grid"><form id="real-task"><section class="card"><h2>普通任务：目标与起点</h2><label>可创建任务的项目<select name="projectId" required disabled><option value="">正在加载项目…</option></select><span class="hint">固定实验项目显示在右侧，沿用已有 Spec 与独立验收。</span></label><p id="project-state" role="status">正在查询可用项目…</p><button type="button" class="secondary" id="reload-projects">重新加载项目</button><label>执行目录<select name="workspaceMode"><option value="worktree">隔离副本（worktree）</option><option value="direct">直接修改当前仓库</option></select><span class="hint">直接模式读取当前文件，修改会立即出现在项目目录；同一仓库串行执行。</span></label><label>起始版本<input name="revision" required maxlength="160" placeholder="准确 commit 或版本引用，如 main"></label><label>当前行为<textarea name="current" required maxlength="4000"></textarea></label><label>期望行为<textarea name="expected" required maxlength="4000"></textarea></label></section><section class="card"><h2>操作范围与检查</h2><label>允许修改的文件 / 目录<textarea name="scope" required placeholder="每行一项，使用仓库相对路径及 / 分隔符"></textarea></label><label class="check"><input name="allowTests" type="checkbox">允许运行测试</label><label class="check"><input name="allowTemporaryChecks" type="checkbox">允许在本机运行 Agent 编写的临时 Python 自测</label><label id="real-targets">固定检查目标<textarea name="targets" placeholder="每行一个 pytest 路径或 文件.py::测试节点"></textarea><span class="hint">填写目标，不填写 python / pytest 命令或选项。</span></label><p id="real-no-check" hidden>本次明确暂不检查。</p></section><div id="save-error" class="notice" role="alert" hidden style="white-space:pre-wrap"></div><div class="actions"><button id="preview-real" disabled>预览任务约定 →</button></div></form><div><section class="card"><h2>已有实验项目</h2><p class="hint">选择项目后进入固定需求和历史轮次，再明确确认是否启动新的真实模型实验。</p><div id="experiment-projects"><p>正在读取实验项目…</p></div></section><section class="card"><h2>普通任务保存什么</h2><p>保存目标、允许范围和检查约定，解析并固定准确 commit。隔离模式使用提交快照，直接模式使用当前文件。</p><p class="muted">保存不代表已执行、检查通过或完成独立实验验收。步数预算默认为 50。</p></section><div class="notice">请勿填写密钥。实验项目不接受网页自定义检查命令，使用后端登记源码、环境和冻结 G/R。</div><a href="#demo" class="button secondary">打开独立演示表单</a><p class="hint">演示流程不保存真实任务。</p><p><a class="button secondary" href="#tasks">普通任务记录 →</a></p><a href="#projects" class="button secondary">全部项目实验 →</a></div></div><dialog id="real-review" aria-label="真实任务约定核对"><h2>确认并保存任务</h2><div id="real-review-content"></div><p>保存后固定约定；隔离模式使用提交快照，直接模式使用当前文件。准确 commit 将在保存成功后展示；修改需求须新建任务。</p><div id="review-error" role="alert" style="white-space:pre-wrap"></div><div class="actions"><button id="save-real">确认保存（不启动）</button><button class="secondary" id="edit-real">返回修改</button></div></dialog>`;
  const form=document.querySelector('#real-task'), select=form.elements.projectId, preview=document.querySelector('#preview-real'), dialog=document.querySelector('#real-review'), save=document.querySelector('#save-real');
  form.insertAdjacentHTML('afterbegin','<section class="card"><label>任务类型<select name="kind"><option value="fix_bug">修复 Bug</option><option value="read_code">阅读代码</option><option value="add_feature">补充小功能</option></select></label><p class="hint">阅读任务填写背景问题和期望分析，不修改文件；功能任务填写现状和新增行为。</p></section>');
  form.elements.kind.value=realDraft.kind||'fix_bug';
@@ -95,7 +136,8 @@ function advancedTask() {
  const active=()=>pageEpoch===epoch;
  for(const name of ['revision','current','expected','scope','targets']) form.elements[name].value=realDraft[name];
  form.elements.allowTests.checked=realDraft.allowTests;
- function remember(){for(const name of ['projectId','revision','current','expected','scope','targets','kind','workspaceMode']) realDraft[name]=form.elements[name].value; realDraft.allowTests=form.elements.allowTests.checked;}
+ form.elements.allowTemporaryChecks.checked=Boolean(realDraft.allowTemporaryChecks);
+ function remember(){for(const name of ['projectId','revision','current','expected','scope','targets','kind','workspaceMode']) realDraft[name]=form.elements[name].value; realDraft.allowTests=form.elements.allowTests.checked;realDraft.allowTemporaryChecks=realDraft.allowTests&&form.elements.kind.value!=='read_code'&&form.elements.allowTemporaryChecks.checked;}
  function toggleKind(){
   const kind=form.elements.kind.value,reading=kind==='read_code';
   const texts={read_code:['要弄清的问题','希望得到的分析','例如：任务提交后，代码如何创建并执行 Agent？','例如：按调用顺序解释，标出相关文件与函数。'],fix_bug:['缺陷表现与复现条件','修复后的预期行为','什么输入或操作触发了什么错误？','修复后应该出现什么结果？'],add_feature:['新增功能需求','验收条件','希望增加什么能力，使用场景是什么？','什么输入应产生什么输出，哪些行为需要保留？']}[kind];
@@ -107,15 +149,15 @@ function advancedTask() {
   form.elements.scope.closest('label').hidden=reading;
  }
  form.elements.kind.onchange=()=>{toggleKind();remember();};toggleKind();
- function toggle(){const enabled=form.elements.allowTests.checked; form.elements.targets.disabled=!enabled;form.elements.targets.required=enabled;document.querySelector('#real-targets').hidden=!enabled;document.querySelector('#real-no-check').hidden=enabled;}
+ function toggle(){const enabled=form.elements.allowTests.checked; form.elements.targets.disabled=!enabled;form.elements.allowTemporaryChecks.disabled=!enabled||form.elements.kind.value==='read_code';form.elements.targets.required=enabled&&(!form.elements.allowTemporaryChecks.checked||form.elements.kind.value==='read_code');document.querySelector('#real-targets').hidden=!enabled;document.querySelector('#real-no-check').hidden=enabled;}
  function buttons(){preview.disabled=!projects.length || pendingCreate || uncertainCreate;save.disabled=pendingCreate || uncertainCreate || !projects.length;document.querySelector('#edit-real').disabled=pendingCreate;save.textContent=pendingCreate?'正在保存…':'确认保存（不启动）';}
  function showError(message){document.querySelector('#save-error').hidden=false;document.querySelector('#save-error').textContent=message;document.querySelector('#review-error').textContent=message;}
  if(uncertainCreate)showError('保存结果暂无法确认，勿直接重复提交。后端可能已保存成功；本轮没有历史列表或幂等查询能力。请先由维护者核对记录。');
  if(pendingCreate)showError('上一保存请求仍在等待响应，请勿重复提交。');
- form.addEventListener('input',remember);form.addEventListener('change',remember);form.elements.allowTests.onchange=()=>{toggle();remember();};toggle();buttons();
+ form.addEventListener('input',remember);form.addEventListener('change',remember);form.elements.allowTests.onchange=()=>{toggle();remember();};form.elements.allowTemporaryChecks.onchange=toggle;form.elements.kind.addEventListener('change',toggle);toggle();buttons();
  async function loadProjects(){const request=++projectRequest;projects=[];select.disabled=true;select.innerHTML='<option value="">正在加载项目…</option>';const experimentHost=document.querySelector('#experiment-projects');experimentHost.innerHTML='<p>正在读取实验项目…</p>';buttons();const state=document.querySelector('#project-state');state.textContent='正在查询可用项目…';try{const response=await fetch('/api/projects',{cache:'no-store'});const data=await response.json();if(!active()||request!==projectRequest)return;if(!response.ok)throw new Error(errorText(data));if(!Array.isArray(data.projects)||!data.projects.every(p=>typeof p.name==='string'&&/^[a-z0-9_-]{1,64}$/.test(p.projectId)))throw new Error('项目列表响应格式异常。');const experimentProjects=data.projects.filter(p=>p.canStartExperiment===true&&Array.isArray(p.modes)&&p.modes.includes('experiment'));experimentHost.innerHTML=experimentProjects.length?experimentProjects.map(p=>`<p><a href="#projects/${encodeURIComponent(p.projectId)}/tasks">${escape(p.name)} · 打开固定实验需求 →</a></p>`).join(''):'<p class="hint">没有可启动的固定实验项目。</p>';projects=data.projects.filter(p=>p.canCreateTask!==false);select.innerHTML=projects.length?'<option value="">请选择普通任务项目</option>'+projects.map(p=>`<option value="${escape(p.projectId)}">${escape(p.name)}</option>`).join(''):'<option value="">无可用普通任务项目</option>';select.disabled=!projects.length;if(projects.some(p=>p.projectId===realDraft.projectId))select.value=realDraft.projectId;state.textContent=projects.length?'已加载可创建普通任务的项目。':'暂无普通任务项目，可在右侧打开固定实验。';}catch(e){if(!active()||request!==projectRequest)return;experimentHost.innerHTML='<p role="alert">实验项目暂无法读取。</p>';select.innerHTML='<option value="">项目加载失败</option>';state.textContent=`项目不可用：${e.message || '后端连接失败'}`;}if(active()&&request===projectRequest)buttons();}
  document.querySelector('#reload-projects').onclick=loadProjects;
- form.onsubmit=e=>{e.preventDefault();if(!projects.length||pendingCreate||uncertainCreate)return;remember();if(!projects.some(p=>p.projectId===realDraft.projectId))return;const lines=value=>value.trim().split(/\r?\n/).map(s=>s.trim());payload={workspaceMode:realDraft.workspaceMode||'worktree',projectId:realDraft.projectId,revision:realDraft.revision.trim(),kind:realDraft.kind,current:realDraft.current.trim(),expected:realDraft.expected.trim(),allowedPaths:realDraft.kind==='read_code'?[]:lines(realDraft.scope),allowTests:realDraft.allowTests,checkTargets:realDraft.allowTests?lines(realDraft.targets):[],maxSteps:50};document.querySelector('#real-review-content').innerHTML=`<p>执行目录：${payload.workspaceMode==='direct'?'直接修改当前仓库':'隔离副本'}</p><p>任务类型：${({read_code:'阅读代码',fix_bug:'修复 Bug',add_feature:'补充小功能'})[payload.kind]}</p>`+contract({project:projects.find(p=>p.projectId===payload.projectId).name,revision:payload.revision,current:payload.current,expected:payload.expected,scope:payload.kind==='read_code'?'只读，不允许修改文件':payload.allowedPaths.join('\n'),allowTests:payload.allowTests,targets:payload.checkTargets.join('\n')});document.querySelector('#review-error').textContent='';dialog.showModal();};
+ form.onsubmit=e=>{e.preventDefault();if(!projects.length||pendingCreate||uncertainCreate)return;remember();if(!projects.some(p=>p.projectId===realDraft.projectId))return;const lines=value=>value.trim().split(/\r?\n/).map(s=>s.trim());payload={workspaceMode:realDraft.workspaceMode||'worktree',projectId:realDraft.projectId,revision:realDraft.revision.trim(),kind:realDraft.kind,current:realDraft.current.trim(),expected:realDraft.expected.trim(),allowedPaths:realDraft.kind==='read_code'?[]:lines(realDraft.scope),allowTests:realDraft.allowTests,checkTargets:realDraft.allowTests?lines(realDraft.targets).filter(Boolean):[],maxSteps:50,...(realDraft.allowTemporaryChecks?{allowTemporaryChecks:true}:{})};document.querySelector('#real-review-content').innerHTML=`<p>执行目录：${payload.workspaceMode==='direct'?'直接修改当前仓库':'隔离副本'}</p><p>任务类型：${({read_code:'阅读代码',fix_bug:'修复 Bug',add_feature:'补充小功能'})[payload.kind]}</p>`+contract({project:projects.find(p=>p.projectId===payload.projectId).name,revision:payload.revision,current:payload.current,expected:payload.expected,scope:payload.kind==='read_code'?'只读，不允许修改文件':payload.allowedPaths.join('\n'),allowTests:payload.allowTests,targets:payload.checkTargets.join('\n')});if(payload.allowTemporaryChecks)document.querySelector('#real-review-content').insertAdjacentHTML('beforeend','<p>允许在本机执行临时 Python 自测</p>');document.querySelector('#review-error').textContent='';dialog.showModal();};
  document.querySelector('#edit-real').onclick=()=>dialog.close();
  dialog.addEventListener('cancel',e=>{if(pendingCreate)e.preventDefault();});
  save.onclick=async()=>{if(pendingCreate||uncertainCreate||!payload)return;pendingCreate=true;buttons();let response;
@@ -182,8 +224,56 @@ function checkLabel(check) {
 }
 function feedbackHTML(feedback) {
  if(!feedback||typeof feedback!=='object')return '<p class="hint">实际反馈摘要：未提供，不补推成功或零计数。</p>';
- const fields=[['类型',feedback.kind],['状态',feedback.status],['实际反馈',feedback.message],['相对路径',feedback.path],['修改路径',Array.isArray(feedback.paths)?feedback.paths.join('、'):undefined],['返回数量',feedback.returned],['总行数',feedback.totalLines],['已应用',typeof feedback.applied==='boolean'?(feedback.applied?'是':'否'):undefined],['测试通过标记',typeof feedback.passed==='boolean'?(feedback.passed?'是':'否'):undefined],['退出码',feedback.exitCode],['超时',typeof feedback.timedOut==='boolean'?(feedback.timedOut?'是':'否'):undefined]];
+ const fields=[
+  ['类型',feedback.kind],['状态',feedback.status],['实际反馈',feedback.message],['观察编号',feedback.observationId],
+  ['相对路径',feedback.path],['修改路径',Array.isArray(feedback.paths)?feedback.paths.join('、'):undefined],
+  ['可见范围',feedback.scope],['查询范围',feedback.scopePath],
+  ['列举完整',typeof feedback.complete==='boolean'?(feedback.complete?'是':'否'):undefined],
+  ['扫描完整',typeof feedback.scanComplete==='boolean'?(feedback.scanComplete?'是':'否'):undefined],
+  ['停止原因',feedback.stopReason],['本页扫描文件',feedback.scannedFiles],
+  ['累计匹配行',feedback.matchedLinesTotal],
+  ['累计跳过',feedback.skippedCounts&&typeof feedback.skippedCounts==='object'?Object.entries(feedback.skippedCounts).map(([key,value])=>`${key}=${value}`).join(' · '):undefined],
+  ['可继续查询',typeof feedback.hasMore==='boolean'?(feedback.hasMore?'是':'否'):undefined],
+  ['返回数量',feedback.returned],['总行数',feedback.totalLines],
+  ['已应用',typeof feedback.applied==='boolean'?(feedback.applied?'是':'否'):undefined],
+  ['测试通过标记',typeof feedback.passed==='boolean'?(feedback.passed?'是':'否'):undefined],
+  ['检查分类',feedback.classification?.code],['分类依据',feedback.classification?.reason],
+  ['退出码',feedback.exitCode],['超时',typeof feedback.timedOut==='boolean'?(feedback.timedOut?'是':'否'):undefined]
+ ];
  return `<dl class="kv">${fields.filter(([,v])=>v!==undefined&&v!==null).map(([label,value])=>`<dt>${label}</dt><dd>${escape(value)}</dd>`).join('')}</dl>${feedback.kind==='test'||Object.hasOwn(feedback,'counts')?`<p class="hint">${escape(countsText(feedback.counts))}</p>`:''}`;
+}
+
+function progressHTML(progress, budget) {
+ const budgetText=budget&&Number.isInteger(budget.remaining_decisions)
+  ? `<p>已用决策 ${escape(budget.used_decisions)} / ${escape(budget.max_decisions)} · 剩余 ${escape(budget.remaining_decisions)}${budget.remaining_includes_current?'（包含本次决策）':''}</p>`
+  : '<p class="hint">决策预算未提供。</p>';
+ if(!progress||!Array.isArray(progress.steps))return budgetText+'<p class="hint">步骤记录未提供。</p>';
+ const labels={pending:'待处理',in_progress:'进行中（最后保存状态）',completed:'模型声明完成',blocked:'受阻'};
+ const evidence=new Map((Array.isArray(progress.evidence)?progress.evidence:[]).map(item=>[item.id,item]));
+ const stale=new Set(Array.isArray(progress.stale_evidence_refs)?progress.stale_evidence_refs:[]);
+ const rows=progress.steps.map(step=>{
+  const refs=Array.isArray(step.evidence_refs)?step.evidence_refs:[];
+  const facts=refs.map(ref=>{
+   const fact=evidence.get(ref);
+   let description=ref;
+   if(fact){
+    let outcome='已记录工具观察';
+    if(fact.passed===true)outcome='检查通过';
+    else if(fact.passed===false)outcome='检查失败';
+    else if(fact.ok===false)outcome='工具失败';
+    else if(fact.applied===true)outcome='已编辑';
+    else if(fact.applied===false)outcome='修改未应用';
+    description+=` · ${fact.action} · ${outcome}`;
+    if(fact.path||fact.file)description+=` · ${fact.path||fact.file}`;
+    if(fact.consistent===false)description+=' · 文件一致性待核实';
+    if(fact.scan_complete===false||fact.complete===false)description+=' · 查询覆盖不完整';
+   }
+   if(stale.has(ref))description+=' · 通过检查已因后续编辑过期';
+   return `<li>${escape(description)}</li>`;
+  }).join('');
+  return `<article class="event"><h4>${escape(step.id)} · ${escape(labels[step.status]||step.status)}</h4><p style="white-space:pre-wrap">${escape(step.goal)}</p>${step.blocked_reason?`<p role="status">阻塞原因：${escape(step.blocked_reason)}</p>`:''}${facts?`<ul>${facts}</ul>`:'<p class="hint">尚无证据引用。</p>'}</article>`;
+ }).join('');
+ return budgetText+`<p class="hint">计划修订 ${escape(progress.revision)} · 当前步骤 ${escape(progress.current_step_id||'未指定')} · 以下步骤为模型报告，实际检查与范围审查单独展示。</p>${rows||'<p>本轮尚未建立步骤列表。</p>'}`;
 }
 
 // M3 keeps execution state independent from the saved contract and preparation.
@@ -268,6 +358,7 @@ function executionPanel(taskRecord) {
   const blocks={PREPARATION_REQUIRED:'需要先准备工作副本',WORKSPACE_UNAVAILABLE:'工作副本不可用',WORKSPACE_DIRTY:'工作副本有未提交或未跟踪内容',EXECUTION_CONFIG_UNAVAILABLE:'本机执行配置不可用',EXECUTION_BUSY:'其他任务正在执行',EXECUTION_UNRESOLVED:'存在未核实的旧执行，需维护者处理',ALREADY_STARTED:'本任务已有执行记录'};
   const phases={queue:'等待调度',agent:'Agent 决策与工具',final_checks:'固定最终检查',delivery:'整理交付'};
   $('#execution-status').innerHTML=`<p><strong>${labels[r?.status]||'状态暂无法确认'}</strong>　<span class="badge">${escape(sourceLabel(r?.source))}</span></p>${message?`<p role="alert" style="white-space:pre-wrap">${escape(message)}</p>`:''}${r?`<dl class="kv"><dt>执行编号</dt><dd>${escape(r.executionId||'未提供')}</dd><dt>阶段</dt><dd>${escape(phases[r.phase]||r.phase||'未提供')}</dd><dt>当前活动</dt><dd>${escape(r.activity||'未提供')}</dd><dt>决策步数</dt><dd>${Number.isInteger(r.steps)?r.steps:'未提供'} / ${Number.isInteger(r.maxSteps)?r.maxSteps:taskRecord.contract.maxSteps}</dd><dt>入队时间</dt><dd>${escape(displayTime(r.queuedAt))}</dd><dt>调度说明</dt><dd>${escape(({WORKER_INTERRUPTED:'Worker 已中断，保留修改和日志待核实',WORKER_HEARTBEAT_LOST:'Worker 心跳中断，执行状态待核实',EXECUTION_UNCONFIRMED:'执行结果待核实',ALREADY_STARTED:'已有执行材料，未重复执行'}[r.stopReason])||r.stopReason||'未提供')}</dd><dt>开始时间</dt><dd>${escape(displayTime(r.startedAt))}</dd><dt>最近记录时间</dt><dd>${escape(displayTime(r.updatedAt))}</dd><dt>结束时间</dt><dd>${escape(displayTime(r.finishedAt))}</dd><dt>存活状态</dt><dd>${escape(r.liveness==='confirmed'?'后端已确认':r.liveness==='stopped'?'后端记录已停止':'暂无法确认')}</dd></dl>${r.startBlockReason?`<p class="hint">启动限制：${escape(blocks[r.startBlockReason]||r.startBlockReason)}</p>`:''}`:''}<p class="hint">记录更新时间不是心跳；不根据停更推断完成或死亡。普通任务执行不属于独立 G/R/P 实验验收。</p>`;
+  if(r)$('#execution-status').insertAdjacentHTML('beforeend',`<section><h3>最后保存的执行步骤</h3>${progressHTML(r.progress,r.budget)}</section>`);
   buttons();
  }
  async function readEvents(){
@@ -275,9 +366,17 @@ function executionPanel(taskRecord) {
   const after=cursor;
   try{const response=await fetch(`${base}/events?after=${after}&limit=50`,{cache:'no-store'});const data=await response.json();if(!active())return;if(!response.ok)throw new Error(errorText(data));
    if(data.taskId!==id||!Array.isArray(data.events)||!Number.isInteger(data.nextCursor)||data.nextCursor<after||typeof data.hasMore!=='boolean'||!data.events.every((e,i)=>Number.isInteger(e.seq)&&e.seq>(i?data.events[i-1].seq:after)&&typeof e.type==='string')||(data.events.length&&data.nextCursor!==data.events.at(-1).seq)||(!data.events.length&&data.nextCursor!==after))throw new Error('事件分页响应格式异常，未推进游标。');
-   const types={phase:'阶段',decision:'模型决策',observation:'工具反馈',model_attempt:'模型请求',finish:'模型主动结束',finish_rejected:'完成声明被退回，继续执行',limit:'步数上限',error:'错误',terminated:'终止记录'};
-   const html=data.events.map(e=>`<article class="event"><div class="meta">#${e.seq} · ${escape(displayTime(e.at))}</div><h3>${escape(types[e.type]||e.type)}</h3><p>${escape([e.phase&&`阶段：${e.phase}`,Number.isInteger(e.step)&&`决策步：${e.step}`,e.action&&`动作：${e.action}`,typeof e.ok==='boolean'&&`工具反馈：${e.ok?'成功':'失败'}`,e.attempt!=null&&`请求尝试：${e.attempt}`,e.outcome&&`请求结果：${e.outcome}`].filter(Boolean).join(' · ')||'后端摘要事件；未提供更多公开内容。')}</p>${e.type==='observation'?feedbackHTML(e.feedback):''}</article>`).join('');
-   $('#event-list').insertAdjacentHTML('beforeend',html);const recent=data.events.filter(e=>e.type==='observation').at(-1);if(recent)$('#recent-feedback').innerHTML='<h3>最近实际反馈</h3>'+feedbackHTML(recent.feedback);cursor=data.nextCursor;text('#event-message',data.hasMore?'还有后续事件，点击继续读取。':cursor?'已读取当前可用摘要；不是私有原始 trace。':'暂无事件记录。');$('#more-events').disabled=!data.hasMore;
+   const types={phase:'阶段',decision:'模型决策',observation:'工具反馈',context:'决策上下文',progress_updated:'步骤更新',model_usage:'模型用量',model_attempt:'模型请求',finish:'模型主动结束',finish_rejected:'完成声明被退回，继续执行',limit:'步数上限',error:'错误',terminated:'终止记录'};
+   const html=data.events.map(e=>{
+    const summary=[e.phase&&`阶段：${e.phase}`,Number.isInteger(e.step)&&`决策步：${e.step}`,e.action&&`动作：${e.action}`,typeof e.ok==='boolean'&&`工具反馈：${e.ok?'成功':'失败'}`,e.attempt!=null&&`请求尝试：${e.attempt}`,e.outcome&&`请求结果：${e.outcome}`].filter(Boolean).join(' · ');
+    let detail=e.type==='observation'?feedbackHTML(e.feedback):'';
+    if(e.type==='progress_updated')detail+=`<details><summary>已保存步骤修订</summary>${progressHTML(e.progress,e.budget)}</details>`;
+    if(e.type==='context')detail+=`<p class="hint">历史消息 ${escape(e.context?.history_messages??'未提供')} · 状态尾 ${escape(e.context?.state_chars??'未提供')} 字符 · 输入 ${escape(e.context?.input_chars??'未提供')} 字符</p>`;
+    if(e.type==='model_usage')detail+=`<p>${e.available?escape(JSON.stringify(e.usage)):'Provider 未返回可识别的实际用量字段'}</p>`;
+    return `<article class="event"><div class="meta">#${e.seq} · ${escape(displayTime(e.at))}</div><h3>${escape(types[e.type]||e.type)}</h3><p>${escape(summary||'后端摘要事件；未提供更多公开内容。')}</p>${detail}</article>`;
+   }).join('');
+   $('#event-list').insertAdjacentHTML('beforeend',html);
+   const recent=data.events.filter(e=>e.type==='observation').at(-1);if(recent)$('#recent-feedback').innerHTML='<h3>最近实际反馈</h3>'+feedbackHTML(recent.feedback);cursor=data.nextCursor;text('#event-message',data.hasMore?'还有后续事件，点击继续读取。':cursor?'已读取当前可用摘要；不是私有原始 trace。':'暂无事件记录。');$('#more-events').disabled=!data.hasMore;
   }catch(e){if(active()){text('#event-message',`事件暂无法读取：${e.message}`);$('#more-events').disabled=false;}}
   finally{eventBusy=false;}
  }
@@ -300,7 +399,12 @@ function executionPanel(taskRecord) {
    artifacts=new Map();
    $('#result-content').innerHTML=`<div class="metrics"><div class="metric">停止原因<strong>${escape(reasons[r.stopReason]||r.stopReason||'未提供')}</strong></div><div class="metric">固定最终检查<strong>${escape(checkLabel(r.finalChecks))}</strong></div><div class="metric">交付范围审查<strong>${checks[r.review.status]}</strong></div></div><p class="hint">检查仅覆盖冻结目标；检查退出码 0 不代替范围审查。未做独立 G/R/P 验收。</p><h3>修改与范围</h3><p>修改文件：${escape(r.review.changedPaths.join('、')||'无记录的修改')}</p><p>越界路径：${escape(r.review.outOfScopePaths.join('、')||'无记录')}</p><p>受保护变动：${escape(r.review.protectedChanges.join('、')||'无记录')}</p><h3>固定最终检查</h3><p>覆盖目标：${escape(r.finalChecks.targets.join('、')||'无')}</p><p>原因：${escape(r.finalChecks.reason||'未提供')}</p><p class="hint">${escape(countsText(r.finalChecks.counts))}</p>${r.finalChecks.checks.length?r.finalChecks.checks.map(c=>`<details open><summary>${escape(c.target)} · ${escape(checkLabel(c))}</summary><p>退出码：${escape(c.exitCode??'未提供')}；超时：${c.timedOut===true?'是':c.timedOut===false?'否':'未提供'}</p><p class="hint">${escape(countsText(c.counts))}；原因：${escape(c.reason||'未提供')}</p><p class="hint">stdout：${escape(c.stdoutArtifactId||'未提供')}；stderr：${escape(c.stderrArtifactId||'未提供')}。实际文本见下方登记材料。</p></details>`).join(''):'<p class="empty">无逐项检查记录，不补写通过结果。</p>'}<h3>未完成事项</h3><p style="white-space:pre-wrap">${escape(r.incomplete.join('\n')||'接口未列出未完成事项；不表示完整功能验收通过。')}</p><h3>本机补丁导出</h3><dl class="kv"><dt>状态</dt><dd>${escape(({saved:'已保存本机补丁',not_exported:'未导出',unavailable:'不可用'}[r.patchExport?.status])||'未提供')}</dd><dt>SHA256</dt><dd>${escape(r.patchExport?.sha256??'未提供')}</dd><dt>字节数</dt><dd>${escape(r.patchExport?.bytes??'未提供')}</dd><dt>原因</dt><dd>${escape(r.patchExport?.reason??'未提供')}</dd></dl><p class="hint">仅描述本机补丁留存，不提供原始补丁下载，不证明可重放或独立验收。</p><h3>Agent 总结（说明）</h3><p style="white-space:pre-wrap">${escape(r.agent?.summary||'未提供')}</p><p class="hint">Agent 状态：${escape(r.agent?.status||'未提供')}。总结不代替 diff、实际输出或范围审查。</p><h3>Diff 与完整公开记录</h3><p class="hint">以下是登记的受控材料，支持分页；脱敏/截断文本不能作为字节一致的补丁验收材料。原始记录仅留本机，当前没有私有 trace 下载。</p>${artifactWidgets(r)||'<p class="empty">未登记材料；不伪造 diff 或检查输出。</p>'}`;
    const completionLabels={completed:'模型报告已完成',already_satisfied:'模型报告现有代码已满足',blocked:'受阻',incomplete:'未完成'};
-   $('#result-content').insertAdjacentHTML('afterbegin',`<section><h3>需求完成状态</h3><p><strong>${escape(completionLabels[r.completion?.status]||'历史记录未提供')}</strong></p><p style="white-space:pre-wrap">${escape(r.completion?.evidence||'未提供依据')}</p><p class="hint">完成状态来自模型及修改记录，实际检查和独立验收见各自结果。</p></section>`);
+   $('#result-content').insertAdjacentHTML('afterbegin',`<section><h3>步骤与交付证据</h3>${progressHTML(r.progress,r.budget)}</section>`);
+   if(r.tokenAccounting)$('#result-content').insertAdjacentHTML('afterbegin',`<p class="hint">已结算 token：${escape(r.tokenAccounting.accountedTokens)} / ${escape(r.tokenAccounting.hardLimitTokens)}</p>`);
+   if(r.finalizationReport)$('#result-content').insertAdjacentHTML('afterbegin',`<p class="notice">未完成：${escape(r.finalizationReport.reason)}</p>`);
+   const acceptanceLabels={needs_review:'待审查',not_assessed:'未评定'};
+   const gaps=r.remaining_gaps||[];
+   $('#result-content').insertAdjacentHTML('afterbegin',`<section><h3>需求完成状态</h3><p><strong>${escape(acceptanceLabels[r.acceptance_status]||'历史记录未提供验收状态')}</strong></p><p>${escape(completionLabels[r.completion?.status]||'历史记录未提供模型结果')} · ${escape(r.execution_status||r.agent?.status||'未记录执行状态')}</p>${gaps.length?`<h4>待验证</h4><ul>${gaps.map(gap=>`<li>${escape(gap.scenario)}。${escape(gap.verification_goal)}</li>`).join('')}</ul>`:''}<p style="white-space:pre-wrap">${escape(r.completion?.evidence||'未提供依据')}</p></section>`);
    if(taskRecord.contract.workspaceMode==='direct')$('#result-content').insertAdjacentHTML('afterbegin','<p class="notice">本轮直接修改当前项目目录，文件变更已保存在原项目中。下方 Diff 展示本轮相对执行前的修改。网页源码变化需刷新页面，后端源码变化需重启对应服务加载。</p>');
    if(r.delivery?.status==='partial')$('#result-content').insertAdjacentHTML('afterbegin','<p class="notice">部分交付：常规结果保存失败，当前显示终止凭据中的已保存内容。材料可能缺失，请查看执行错误详情。</p>');
    for(const [artifactId,a] of artifacts)$(`#artifact-load-${a.index}`).onclick=()=>readArtifact(artifactId);
@@ -549,7 +653,7 @@ async function projectHistory(parts=[]) {
    const [task,data]=await Promise.all([get(taskPath),get(taskPath+'/rounds')]);if(!active())return;
    if(task.mode!=='ordinary'||!Array.isArray(data.rounds))throw new Error('普通需求格式异常');
    const c=task.contract;
-   shell(task.title||taskKey,`<section class="card"><h2>普通需求</h2>${historyFields([['项目',projectId],['需求编号',taskKey],['任务类型',c.kind],['背景 / 当前行为',c.current],['期望分析 / 行为',c.expected],['原版本引用',c.requestedRevision],['允许修改',c.kind==='read_code'?'只读':c.allowedPaths.join('、')]])}<p>Git 任务每轮重新解析版本；普通文件按当前内容执行。旧轮次快照保留。</p><label>新轮次执行目录<select id="round-workspace-mode"><option value="worktree" ${c.workspaceMode!=='direct'?'selected':''}>隔离副本（worktree）</option><option value="direct" ${c.workspaceMode==='direct'?'selected':''}>直接修改当前仓库</option></select></label><label>新轮次步数上限<input id="round-max-steps" type="number" min="1" max="50" step="1" value="50" required></label><button id="new-ordinary-round">准备新一轮（不启动模型）</button><p id="ordinary-round-message" role="status"></p></section><section class="card"><h2>全部运行轮次</h2>${table(['轮次','创建时间','固定版本','入口'],data.rounds.map(r=>`<tr><td>${escape(r.roundId)}</td><td>${escape(displayTime(r.createdAt))}</td><td>${escape(r.baseCommit||'当前文件（无 Git 版本）')}</td><td><a href="#/tasks/${escape(r.runTaskId)}">查看执行与结果 →</a></td></tr>`))}</section>`);
+    shell(task.title||taskKey,`<section class="card"><h2>普通需求</h2>${historyFields([['项目',projectId],['需求编号',taskKey],['任务类型',c.kind],['背景 / 当前行为',c.current],['期望分析 / 行为',c.expected],['原版本引用',c.requestedRevision],['允许修改',c.kind==='read_code'?'只读':c.allowedPaths.join('、')]])}<p>Git 任务每轮重新解析版本；普通文件按当前内容执行。旧轮次快照保留。</p><label>新轮次执行目录<select id="round-workspace-mode"><option value="worktree" ${c.workspaceMode!=='direct'?'selected':''}>隔离副本（worktree）</option><option value="direct" ${c.workspaceMode==='direct'?'selected':''}>直接修改当前仓库</option></select></label><label>新轮次最大执行次数<input id="round-max-steps" type="number" min="1" max="50" step="1" value="50" required><span class="hint">设置本轮 LLM 最大执行步数（1–50）。</span></label><button id="new-ordinary-round">准备新一轮（不启动模型）</button><p id="ordinary-round-message" role="status"></p></section><section class="card"><h2>全部运行轮次</h2>${table(['轮次','创建时间','固定版本','入口'],data.rounds.map(r=>`<tr><td>${escape(r.roundId)}</td><td>${escape(displayTime(r.createdAt))}</td><td>${escape(r.baseCommit||'当前文件（无 Git 版本）')}</td><td><a href="#/tasks/${escape(r.runTaskId)}">查看执行与结果 →</a></td></tr>`))}</section>`);
    ordinaryRoundControl(taskPath,projectId,taskKey);return 'ordinary';
   }
   if(!roundId){const [task,roundData]=await Promise.all([get(taskPath),get(taskPath+'/rounds')]);if(!active())return;if(!Array.isArray(roundData.rounds))throw new Error('轮次列表格式异常');shell(task.title||taskKey,`<section class="card"><h2>需求身份</h2>${historyFields([['项目',projectId],['需求',taskKey],['模式',task.mode],['Issue',task.issueId],['需求引用',task.requirementRef],['需求版本',task.requirementRevision],['历史可用性',task.historyAvailability]])}<p class="hint">当前需求引用不是历史轮次快照，缺失版本不补造。</p><div id="legacy-history-links"></div></section><section class="card"><h2>多轮记录</h2><p class="hint">prepare 目录不代表从未运行模型；verify-02 是同轮追加验收，不是第二次模型运行。历史运行状态不用于推断当前存活。</p>${roundData.rounds.length?table(['轮次 / 来源','原总报告结论','Agent 停止状态','P 导出','独立验收次数','入口'],roundData.rounds.filter(r=>r.association!=='unlinked'&&r.taskKey!==null).map(r=>`<tr><td>${escape(r.roundId)}<br>${escape(historyValue(r.entry))} / ${escape(historyValue(r.sourceFormat))}<br>${escape(r.createdAt?displayTime(r.createdAt):'时间未记录')}</td><td>${escape(historyValue(r.originalRunConclusion))}</td><td>${escape(historyValue(r.agentStatus))}</td><td>${escape(historyValue(r.exportStatus))}</td><td>${escape(historyValue(r.verificationCount))}</td><td><a href="${historyHref([projectId,'tasks',taskKey,'rounds',r.roundId])}">查看轮次 →</a></td></tr>`)):'<p class="empty">没有可明确关联的轮次，不补造运行。</p>'}</section><section class="card"><h2>未关联材料</h2>${roundData.rounds.filter(r=>r.association==='unlinked'||r.taskKey===null).map(r=>`<p><a href="${historyHref([projectId,'tasks',taskKey,'rounds',r.roundId])}">${escape(r.roundId)} →</a> · ${escape(historyValue(r.sourceFormat))} · 不推断归属</p>`).join('')||'<p class="hint">没有返回未关联材料。</p>'}<p>${escape(Array.isArray(roundData.warnings)?roundData.warnings.join('；'):'')}</p></section>`);return;}
@@ -560,12 +664,33 @@ async function projectHistory(parts=[]) {
  }catch(e){if(active())shell('历史读取失败',`<section class="card"><p role="alert">${escape(e.message)}。不将读取失败当作空历史，也不补写缺失证据。</p><a href="#projects">返回项目历史</a></section>`);}
 }
 
+let chatCleanup = () => {};
 async function render() {
  executionCleanup();
+ chatCleanup();
+ chatCleanup = () => {};
  pageEpoch++;
  const epoch=pageEpoch;
  const hash=location.hash.slice(1);
- if(hash==='projects'||hash.startsWith('projects/')) {
+ if(!hash || hash==='chat' || hash.startsWith('chat/')) {
+  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#chat'));
+  document.querySelector('#breadcrumb').textContent='工作台 / Chat';
+  const parts=hash.split('/');
+  const conversationId=parts[1] || null;
+  if(parts.length>2 || conversationId && !/^[0-9a-f]{32}$/.test(conversationId)) {
+   app.innerHTML='<p role="alert">会话链接无效。</p><a class="button" href="#chat">返回 Chat</a>';
+  } else {
+   app.innerHTML='<p class="muted">正在载入会话…</p>';
+   try {
+    const {mountChat}=await import('./chat.js');
+    if(pageEpoch!==epoch)return;
+    chatCleanup=mountChat(app,conversationId);
+   } catch {
+    if(pageEpoch===epoch)app.innerHTML='<p role="alert">Chat 页面加载失败，请刷新重试。</p>';
+   }
+  }
+ }
+ else if(hash==='projects'||hash.startsWith('projects/')) {
   const parts=hash.split('/').slice(1).map(decodeURIComponent);
   document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#projects'));
   const mode=await projectHistory(parts);

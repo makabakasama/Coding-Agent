@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from examples import browser_use_5998, pydantic_ai_10525 as entry
 from repo_agent.core.decisions import Decision
+from repo_agent.core.context import latest_tool_result
 from repo_agent.experimentation.experiment_runner import ExperimentRunner
 from repo_agent.experimentation.experiments import ExperimentSpec, experiment_environment
 from repo_agent.infrastructure.run_evidence import sha256
@@ -161,7 +162,7 @@ class WorkspaceEnvironmentTest(unittest.TestCase):
                     if self.calls == 1:
                         return Decision("read_file", {"path": "layout/pkg.py"})
                     if self.calls == 2:
-                        observation = json.loads(messages[-1]["content"])
+                        observation = latest_tool_result(messages)
                         return Decision("replace_lines", {"snapshot_id": observation["data"]["snapshot_id"],
                             "start": 2, "end": 2, "new_text": "    return a + b\n"})
                     if self.calls == 3:

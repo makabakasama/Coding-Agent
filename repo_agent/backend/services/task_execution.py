@@ -16,11 +16,14 @@ import sys
 import uuid
 
 from repo_agent.core.agent import Agent
+from repo_agent.core.check_quality import delivery_verdict
+from repo_agent.core.coding_budget import coding_budget
 from repo_agent.core.config import read_dotenv
 from repo_agent.core.provider import OpenAICompatibleProvider
 from repo_agent.infrastructure.run_evidence import archive_agent_source
 from repo_agent.backend.schemas.task_contract import TASK_ID, TaskError, _relative_path
 from repo_agent.backend.services.task_execution_tools import TaskRepoTools, protected
+from repo_agent.backend.services.local_development_checks import LocalDevelopmentChecks, source_snapshot
 from repo_agent.infrastructure.file_io import exclusive, now, read_json, write_json
 
 logger = logging.getLogger('repo_agent.worker')
@@ -38,6 +41,20 @@ def git(root, *args):
             options.extend(["-c", prefix + "." + suffix + "=" + value])
     return subprocess.run(["git", "--no-optional-locks", *options, "-c", "core.fsmonitor=false",
                            "-C", str(root), *args], capture_output=True, check=True, timeout=30).stdout
+
+
+def file_patch(relative, before, after):
+    """Text diff with explicit existence metadata even for an empty new/deleted file."""
+    old = "a/" + relative if before is not None else "/dev/null"
+    new = "b/" + relative if after is not None else "/dev/null"
+    patch = "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                    for line in difflib.unified_diff((before or "").splitlines(keepends=True),
+                                                    (after or "").splitlines(keepends=True),
+                                                    fromfile=old, tofile=new))
+    if before is None or after is None:
+        header = f'diff --git {json.dumps("a/" + relative, ensure_ascii=False)} {json.dumps("b/" + relative, ensure_ascii=False)}\n'
+        patch = header + ("new file mode 100644\n" if before is None else "deleted file mode 100644\n") + patch
+    return patch.encode("utf-8")
 
 
 from repo_agent.infrastructure.redaction import Redactor
@@ -66,7 +83,9 @@ class RecordedAgent(Agent):
                 feedback.update(status=data["check_status"], passed=data["passed"], exitCode=data.get("exit_code"),
                                 timedOut=data.get("timed_out", False), counts=data.get("counts"),
                                 message=data.get("check_reason") or "固定目标测试已通过")
-            for original, key in (("file", "path"), ("returned", "returned"), ("total_lines", "totalLines"),
+                if data.get('classification'):
+                    feedback['classification'] = self.redactor.public_value(data['classification'])
+            for original, key in (("file", "path"), ("path", "path"), ("returned", "returned"), ("total_lines", "totalLines"),
                                   ("paths", "paths"), ("applied", "applied")):
                 if original in data:
                     feedback[key] = data[original]
@@ -74,11 +93,41 @@ class RecordedAgent(Agent):
                 feedback.update(status="error", message=self.redactor.public(data.get("error") or data.get("stderr") or "修改未应用"))
             if "matches" in data:
                 feedback["returned"] = len(data["matches"])
+            if item["action"] in ("list_files", "search_code") and result["ok"]:
+                for original, key in (("scope", "scope"), ("complete", "complete"),
+                                      ("scan_complete", "scanComplete"), ("stop_reason", "stopReason"),
+                                      ("scanned_files", "scannedFiles"), ("matched_lines_total", "matchedLinesTotal"),
+                                      ("skipped_counts", "skippedCounts"), ("has_more", "hasMore")):
+                    if original in data:
+                        feedback[key] = data[original]
+                scope_path = data.get("path", data.get("subdir"))
+                if scope_path is not None:
+                    feedback["scopePath"] = self.redactor.public(scope_path)
+                complete = data.get("scan_complete", data.get("complete"))
+                if complete is False:
+                    feedback.update(status="partial", message="本次结果覆盖不完整，请核对停止原因、跳过计数及后续页")
+                elif complete is True:
+                    feedback["message"] = ("所选可见范围已扫描完成" if item["action"] == "search_code"
+                                           else "所选可见范围已列举完成")
             feedback.update(messageTruncated=len(feedback["message"]) > 400, redacted=True)
             feedback["message"] = feedback["message"][:400]
             event["feedback"] = feedback
         if item["type"] == "model_request_attempt":
             event["type"] = "model_attempt"
+        if item['type'] == 'context':
+            runtime = item['runtime_state']
+            event['progress'] = self.redactor.public_value(runtime['progress'])
+            event['budget'] = {key: runtime[key] for key in
+                               ('used_decisions', 'remaining_decisions', 'max_decisions', 'remaining_includes_current')}
+            event['context'] = item['context']
+        if 'progress' in item:
+            event['progress'] = self.redactor.public_value(item['progress'])
+        if 'budget' in item:
+            event['budget'] = item['budget']
+        if item['type'] == 'model_usage':
+            event.update(usage=item['usage'], available=item['available'])
+        if item['type'] == 'observation' and item['result'].get('observation_id'):
+            event['feedback']['observationId'] = item['result']['observation_id']
         self.recorder(event)
 
 
@@ -88,9 +137,13 @@ class TaskExecution:
                  getattr(self.store,'project_workspaces',self.preparation.workspace_root), self.preparation.workspace_root}
         return tuple(path for path in paths if not workspace.is_relative_to(path))
 
-    def __init__(self, store, projects, preparation, *, model_factory=None):
+    def __init__(self, store, projects, preparation, *, model_factory=None,
+                 token_counter_factory=None):
         self.store, self.projects, self.preparation = store, projects, preparation
         self.model_factory = model_factory or OpenAICompatibleProvider
+        from repo_agent.core.token_budget import TokenBudget
+        self.token_counter_factory = token_counter_factory or TokenBudget
+        self.chat_token_limits = None
         self.source = "injected_test_model" if model_factory is not None else "configured_provider"
         self.threads = []
 
@@ -149,11 +202,15 @@ class TaskExecution:
         required = {"schemaVersion", "taskId", "executionId", "status", "source", "canStart", "startBlockReason",
                     "isExecutionSandbox", "phase", "activity", "steps", "maxSteps", "startedAt", "updatedAt",
                     "finishedAt", "liveness", "stopReason", "resultAvailable"}
-        if (type(state) is not dict or set(state) != required or state["schemaVersion"] != 1
+        if (type(state) is not dict or not required.issubset(state)
+                or set(state) - required - {'progress', 'budget'} or state["schemaVersion"] != 1
                 or state["taskId"] != task_id or not TASK_ID.fullmatch(state["executionId"])
                 or state["status"] not in ("running", "finalizing", "terminated", "unknown")
                 or state["source"] not in ("configured_provider", "injected_test_model")):
             raise ValueError("Invalid execution state")
+        if ('progress' in state and type(state['progress']) is not dict
+                or 'budget' in state and type(state['budget']) is not dict):
+            raise ValueError('Invalid saved progress or budget')
         return state
 
     def _owner(self):
@@ -228,8 +285,11 @@ class TaskExecution:
     def _direct_execution(self):
         from repo_agent.backend.services.direct_execution import DirectExecution, DirectPreparation
         preparation = DirectPreparation(self.store, self.projects, self.preparation.workspace_root)
-        execution = DirectExecution(self.store, self.projects, preparation, model_factory=self.model_factory)
+        execution = DirectExecution(self.store, self.projects, preparation,
+                                    model_factory=self.model_factory,
+                                    token_counter_factory=self.token_counter_factory)
         execution.source = self.source
+        execution.chat_token_limits = self.chat_token_limits
         return execution
 
     def _workspace(self, task):
@@ -376,29 +436,13 @@ class TaskExecution:
             for relative in sorted(set(safe_paths) - tracked):
                 path = workspace / relative
                 if tools.editable(relative) and path.is_file() and path.stat().st_size <= 800000:
-                    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-                    patch += "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
-                                    for line in difflib.unified_diff([], lines, fromfile="/dev/null", tofile="b/" + relative)).encode("utf-8")
+                    patch += file_patch(relative, None, path.read_bytes().decode("utf-8"))
                 else:
                     omitted.append(relative)
         return patch, omitted
 
     def _snapshot(self, workspace):
-        result = {}
-        for base, dirs, files in os.walk(workspace, followlinks=False):
-            dirs[:] = [d for d in dirs if d != ".git"]
-            for name in list(dirs) + files:
-                path = Path(base) / name
-                relative = path.relative_to(workspace).as_posix()
-                if relative == ".git":
-                    continue
-                if path.resolve() != path:
-                    result[relative] = "LINK"
-                    if name in dirs:
-                        dirs.remove(name)
-                elif path.is_file():
-                    result[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-        return result
+        return source_snapshot(workspace)
 
     def _review(self, workspace, identity, baseline, tools):
         after = self._snapshot(workspace)
@@ -436,7 +480,7 @@ class TaskExecution:
         incomplete = []
         stop = "execution_error"
         patch_export = {"status": "unavailable", "sha256": None, "bytes": None, "reason": "DIFF_UNAVAILABLE"}
-        baseline, tools = None, None
+        baseline, tools, measured = None, None, None
         delivery_step = "begin_delivery"
         delivery_complete = False
 
@@ -473,12 +517,30 @@ class TaskExecution:
             completion = agent_result.get('outcome', 'incomplete')
             if task['contract']['kind'] != 'read_code' and completion == 'completed' and not review['changedPaths']:
                 completion = 'incomplete'
+            verification = {}
+            if tools and tools.checks:
+                try:
+                    verification = tools.checks.refresh_verification_summary()
+                except (OSError, ValueError):
+                    # The Agent's last recorded gap is still useful if the workspace is unavailable.
+                    verification = {'priorityGap': agent_result.get('priority_gap')}
+            verdict = delivery_verdict(stop, agent_result.get('model_reported_outcome'),
+                                       verification, assess=task['contract']['kind'] != 'read_code')
             return {'schemaVersion': 1, 'taskId': task['taskId'], 'executionId': state['executionId'],
+                    **redactor.public_value(verdict),
                     'completion': {'status': completion,
                                    'evidence': redactor.public(agent_result.get('evidence', '')),
-                                   'modelReported': completion == agent_result.get('outcome')},
+                                   'modelReported': completion == agent_result.get('outcome')
+                                                    and 'finalizationReport' not in agent_result},
                     'source': self.source, 'stopReason': stop, 'agent': agent, 'finalChecks': checks,
                     'review': review, 'artifacts': artifacts, 'patchExport': patch_export,
+                    'progress': redactor.public_value(agent_result.get('progress', state.get('progress'))),
+                    'budget': {'used_decisions': agent_result.get('steps', state['steps']),
+                               'max_decisions': state['maxSteps'],
+                               'remaining_decisions': max(0, state['maxSteps'] - agent_result.get('steps', state['steps']))},
+                    **({'tokenAccounting': measured.accounting()} if measured is not None else {}),
+                    **({'finalizationReport': redactor.public_value(agent_result['finalizationReport'])}
+                       if 'finalizationReport' in agent_result else {}),
                     'incomplete': incomplete, 'independentlyVerified': False,
                     'delivery': {'status': 'partial' if partial else 'complete'}}
 
@@ -494,8 +556,11 @@ class TaskExecution:
                         task['taskId'], state['executionId'], value['type'], value.get('step', '-'),
                         value.get('action', '-'), value.get('phase', '-'), value.get('ok', '-'),
                         value.get('feedback', {}).get('status', '-'))
-            if "step" in value:
-                save_state(steps=value["step"])
+            updates = {key: value[key] for key in ('progress', 'budget') if key in value}
+            if 'step' in value:
+                updates['steps'] = value['step']
+            if updates:
+                save_state(**updates)
 
         def artifact(identifier, kind, raw):
             target = self._path(directory / "public")
@@ -542,17 +607,66 @@ class TaskExecution:
             if getattr(model, "api_key", None):
                 redactor.secrets.add(model.api_key)
             contract = task["contract"]
+            if contract['allowTests']:
+                def read_initial(relative):
+                    if hasattr(self, 'initial_contents'):
+                        return self.initial_contents[relative]
+                    path = workspace / relative
+                    if path.is_file() and path.resolve() == path:
+                        raw = path.read_bytes()
+                        if hashlib.sha256(raw).hexdigest() == baseline.get(relative):
+                            return raw
+                    return git(workspace, 'cat-file', '--filters', contract['baseCommit'] + ':' + relative)
+
+                tools.checks = LocalDevelopmentChecks(
+                    tools, contract, test_logs, initial=baseline,
+                    snapshot=lambda: self._snapshot(workspace), read_initial=read_initial, redactor=redactor)
+                tools.require_check_before_completion = contract['kind'] != 'read_code'
+                if isinstance(model, OpenAICompatibleProvider):
+                    model.configure_development_checks(temporary=tools.checks.files is not None)
             instructions = {
                 "read_code": "Read-only code investigation. current is the question to investigate; expected is the requested analysis. Do not implement a repair or edit any files. Finish with findings, relevant file paths and functions, evidence, and unanswered questions.",
                 "fix_bug": "Investigate and repair the reported defect. current describes the defect and reproduction conditions; expected describes correct behavior. Report the cause, minimal repair, actual checks and remaining work.",
                 "add_feature": "Implement the requested small feature. current is the new feature request, not a bug report; expected lists acceptance conditions. Preserve existing behavior and report the implementation, actual checks and unmet conditions.",
             }
             prompt = instructions[contract["kind"]] + "\nFrozen task contract:\n" + json.dumps(contract, ensure_ascii=False)
+            if 'conversationContext' in contract:
+                prompt += ("\nconversationContext contains saved earlier messages and verified historical observations. "
+                           "The latest current/expected fields define this task. Historical file versions may be stale; "
+                           "read the current workspace before editing. The frozen contract controls permissions.")
             prompt += "\nOnly edit allowedPaths business code when the task permits editing. Never edit tests/configuration. Only run frozen checkTargets."
-            agent = RecordedAgent(model, tools, trace_dir=directory / "trace", max_steps=state["maxSteps"],
-                                  recorder=event, redactor=redactor)
+            if tools.checks is not None:
+                prompt += ("\nRun related authorized repository checks first and rerun them after edits. "
+                           "Use check feedback and report any unverified behavior. "
+                           "Optional review can map task quotes to assertion lines and cite frozen source.")
+                if tools.checks.files is not None:
+                    prompt += (" You are also authorized to create and run temporary Python checks under "
+                               ".agent-checks/ to reproduce gaps in repository checks. These checks are "
+                               "separate from repository files and final delivery checks.")
+            token_budget = None
+            if 'conversationContext' in contract:
+                if self.chat_token_limits is None:
+                    raise TaskError(409, 'CHAT_TOKEN_CONFIG_MISSING', 'Worker 未配置会话执行的模型 token 预算')
+            if all(callable(getattr(model, name, None)) for name in
+                   ('decide_with_limits', 'get_tool_definitions', 'set_event_sink')) and getattr(model, 'model', None):
+                measured = coding_budget(model,
+                    {'taskId': task['taskId'], 'problemStatement': contract['expected'] + '\n' + contract['current']},
+                    redactor, counter_factory=self.token_counter_factory,
+                    context=self.chat_token_limits if 'conversationContext' in contract else None)
+                token_budget = measured.budget
+            elif 'conversationContext' in contract:
+                token_budget = self.token_counter_factory(
+                    getattr(model, 'model', 'injected-model'), **self.chat_token_limits)
+            agent = RecordedAgent(measured or model, tools, trace_dir=directory / "trace", max_steps=state["maxSteps"],
+                                  recorder=event, redactor=redactor, token_budget=token_budget)
             agent_result = {"status": "error", "steps": 0}
             agent_result = agent.run(prompt)
+            progress = agent_result.get('progress', {})
+            for item in progress.get('steps', []):
+                if item['status'] != 'completed':
+                    incomplete.append(redactor.public(f"步骤 {item['id']}（{item['status']}）：{item['goal']} {item['blocked_reason']}"))
+            if progress.get('stale_evidence_refs'):
+                incomplete.append('部分完成步骤引用了旧编辑版本的通过检查，仍需核实')
             if agent_result.get('outcome') in ('blocked', 'incomplete'):
                 incomplete.append('Agent 声明任务受阻或未完成，详见交付状态及依据')
             write_json(directory / "agent-result.json", json.loads(redactor.private(json.dumps(agent_result, ensure_ascii=False))))
@@ -567,6 +681,9 @@ class TaskExecution:
             elif not task["contract"]["allowTests"]:
                 checks.update(status="skipped", reason="TESTS_NOT_AUTHORIZED")
                 incomplete.append("用户未授权测试，未验证修复效果")
+            elif not task["contract"]["checkTargets"]:
+                checks.update(status="skipped", reason="NO_FIXED_CHECK_TARGETS")
+                incomplete.append("本轮仅授权临时自测，缺少约定的最终检查")
             else:
                 checks.update(status="passed", reason=None)
                 for index, target in enumerate(task["contract"]["checkTargets"], 1):
@@ -582,8 +699,10 @@ class TaskExecution:
                             item[stream + "ArtifactId"] = identifier
                     if outcome.get("check_reason"):
                         item["reason"] = outcome["check_reason"]
+                    if outcome.get('classification'):
+                        item['classification'] = redactor.public_value(outcome['classification'])
                     checks["checks"].append(item)
-                    if item["status"] == "failed":
+                    if item["status"] in ("failed", "unknown"):
                         checks["status"] = "failed"
                     review = self._review(workspace, identity, baseline, tools)
                     if review["status"] != "passed":
@@ -704,7 +823,7 @@ class TaskExecution:
                 number = int(path.stem)
                 if number > after:
                     row = read_json(self._path(path))
-                    if row.get("seq") != number or set(row) - {"seq", "at", "type", "phase", "step", "action", "ok", "attempt", "outcome", "feedback"}:
+                    if row.get("seq") != number or set(row) - {"seq", "at", "type", "phase", "step", "action", "ok", "attempt", "outcome", "feedback", "progress", "budget", "context", "usage", "available"}:
                         raise ValueError("Invalid event")
                     rows.append(row)
                     if len(rows) > limit:

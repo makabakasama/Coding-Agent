@@ -1,4 +1,5 @@
 from copy import deepcopy
+from repo_agent.core.context import latest_tool_result
 import http.client
 import io
 import json
@@ -67,8 +68,9 @@ class ProviderRetryTest(unittest.TestCase):
         self.assertEqual(original, messages)
         self.assertEqual([7, 7], [item.kwargs["timeout"] for item in self.send.call_args_list])
         self.sleep.assert_called_once_with(0.5)
-        self.assertEqual(["failed", "response_received"], [e["outcome"] for e in self.events])
-        self.assertEqual([1, 2], [e["attempt"] for e in self.events])
+        attempts = [event for event in self.events if event['type'] == 'model_request_attempt']
+        self.assertEqual(["failed", "response_received"], [e["outcome"] for e in attempts])
+        self.assertEqual([1, 2], [e["attempt"] for e in attempts])
         self.assertEqual("SSLEOFError", self.events[0]["cause_type"])
         self.assertEqual("tls_eof", self.events[0]["reason"])
         self.assertTrue(self.events[0]["will_retry"])
@@ -161,7 +163,8 @@ class ProviderRetryTest(unittest.TestCase):
         self.send.side_effect = [eof(), eof(), response(), eof(), eof(), response()]
         self.provider.decide([])
         self.provider.decide([])
-        self.assertEqual([1, 2, 3, 1, 2, 3], [e["attempt"] for e in self.events])
+        attempts = [event for event in self.events if event['type'] == 'model_request_attempt']
+        self.assertEqual([1, 2, 3, 1, 2, 3], [e["attempt"] for e in attempts])
         self.assertEqual([call(0.5), call(1.0)] * 2, self.sleep.call_args_list)
         single = OpenAICompatibleProvider(model="fixture", base_url="https://model.invalid/v1",
                                            api_key="", max_retries=0)
@@ -191,7 +194,7 @@ class ProviderRetryTest(unittest.TestCase):
                 if len(requests) == 1:
                     return response(Decision("read_file", {"path": "sample.py"}, "read").assistant_message)
                 if len(requests) == 2:
-                    observation = json.loads(json.loads(request.data)["messages"][-1]["content"])
+                    observation = latest_tool_result(json.loads(request.data)["messages"])
                     return response(Decision("replace_lines", {"snapshot_id": observation["data"]["snapshot_id"],
                         "start": 1, "end": 1, "new_text": "print('new')\n"}, "edit").assistant_message)
                 if len(requests) == 3:
@@ -260,8 +263,9 @@ class ProviderRetryTest(unittest.TestCase):
             self.assertEqual("agent_reported_finished", result["status"])
             self.assertEqual(2, result["steps"])
             history = json.loads(self.send.call_args_list[-1].args[0].data)["messages"]
-            self.assertEqual("bad", history[-1]["tool_call_id"])
-            self.assertFalse(json.loads(history[-1]["content"])["ok"])
+            tool_message = next(message for message in reversed(history) if message['role'] == 'tool')
+            self.assertEqual("bad", tool_message["tool_call_id"])
+            self.assertFalse(json.loads(tool_message["content"])["ok"])
             events = [json.loads(line) for line in agent.trace_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(1, next(e for e in events if e["type"] == "decision_error")["step"])
 

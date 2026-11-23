@@ -6,6 +6,7 @@ import sys
 import tempfile
 
 from repo_agent.core.agent import Agent
+from repo_agent.core.context import latest_tool_result
 from repo_agent.core.decisions import Decision
 from repo_agent.core.tools import RepoTools
 
@@ -24,7 +25,7 @@ class ScriptedModel:
     def decide(self, messages):
         decision = next(self.steps)
         if decision["action"] == "replace_lines":
-            observation = json.loads(messages[-1]["content"])
+            observation = latest_tool_result(messages)
             decision["args"]["snapshot_id"] = observation["data"]["snapshot_id"]
         return Decision(**decision)
 

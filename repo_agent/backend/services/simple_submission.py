@@ -11,7 +11,7 @@ class SimpleSubmission:
 
     def normalize(self, value):
         allowed = {'instruction', 'targetPath', 'projectId', 'kind', 'maxSteps', 'workspaceMode',
-                   'revision', 'allowedPaths', 'allowTests', 'checkTargets', 'expected'}
+                   'revision', 'allowedPaths', 'allowTests', 'checkTargets', 'expected', 'allowTemporaryChecks'}
         if set(value) - allowed:
             raise TaskError(400, 'VALIDATION_ERROR', '简化任务包含不支持的字段')
         instruction = value.get('instruction')
@@ -62,6 +62,8 @@ class SimpleSubmission:
                     'allowedPaths':[] if kind=='read_code' else value.get('allowedPaths') or [scope],
                     'allowTests':value.get('allowTests',False),'checkTargets':value.get('checkTargets',[]),
                     'maxSteps':value.get('maxSteps',50)}
+        if 'allowTemporaryChecks' in value:
+            contract['allowTemporaryChecks'] = value['allowTemporaryChecks']
         if target_file:
             contract['targetFile'] = target_file
         contract = validate_contract(contract)

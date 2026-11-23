@@ -23,11 +23,13 @@ HTTP 服务继续使用现有标准库实现。新增接口时在 `routers` 中�
 
 ## 启动与检查
 
+先运行 `conda activate coding-agent`，下列命令均使用该环境的 Python。
+
 ```powershell
-.venv/Scripts/python.exe -m repo_agent.backend.app --port 4173
-.venv/Scripts/python.exe -m repo_agent.cli.task_cli --help
-.venv/Scripts/python.exe -m repo_agent.cli.import_task_history --help
-.venv/Scripts/python.exe -m pytest tests -q
+python -m repo_agent.backend.app --port 4173
+python -m repo_agent.cli.task_cli --help
+python -m repo_agent.cli.import_task_history --help
+python -m pytest tests -q
 ```
 
 根目录的 `task_http.py`、`task_cli.py` 和 `import_task_history.py` 只保留旧命令的转发入口。其他 Python 调用方使用新包路径，例如 `from repo_agent.backend.services.task_service import TaskService`。

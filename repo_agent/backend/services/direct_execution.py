@@ -1,12 +1,11 @@
 """Ordinary tasks operating on the registered repository's current files."""
-import difflib
 import hashlib
 import subprocess
 from pathlib import Path
 import uuid
 
 from repo_agent.backend.schemas.task_contract import TaskError
-from repo_agent.backend.services.task_execution import TaskExecution, git
+from repo_agent.backend.services.task_execution import TaskExecution, file_patch, git
 from repo_agent.backend.services.task_preparation import TaskPreparation
 from repo_agent.infrastructure.file_io import exclusive, now, write_json
 
@@ -159,8 +158,6 @@ class DirectExecution(TaskExecution):
             except UnicodeError:
                 omitted.append(relative)
                 continue
-            patch += ''.join(line if line.endswith('\n') else line + '\n\\ No newline at end of file\n'
-                             for line in difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
-                                 fromfile='a/' + relative if relative in self.initial_contents else '/dev/null',
-                                 tofile='b/' + relative if path.is_file() else '/dev/null')).encode('utf-8')
+            patch += file_patch(relative, old if relative in self.initial_contents else None,
+                                new if path.is_file() else None)
         return patch, omitted

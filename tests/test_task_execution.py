@@ -9,6 +9,7 @@ from unittest.mock import patch
 from tests import test_tasks as fixtures
 from tests.test_tasks import request_contract, serving, http
 from repo_agent.core.decisions import Decision
+from repo_agent.core.context import latest_tool_result
 from repo_agent.backend.schemas.task_contract import TaskError
 from repo_agent.backend.repositories.task_projects import TaskProjects
 from repo_agent.backend.services.task_service import TaskService
@@ -93,7 +94,7 @@ class ExecutionTest(unittest.TestCase):
                 if self.step == 1:
                     return Decision("read_file", {"path": "calc.py"})
                 if self.step == 2:
-                    observation = json.loads(messages[-1]["content"])
+                    observation = latest_tool_result(messages)
                     return Decision("replace_lines", {"snapshot_id": observation["data"]["snapshot_id"],
                                                       "start": 2, "end": 2, "new_text": "    return a + b\n"})
                 if self.step == 3:
@@ -147,6 +148,40 @@ class ExecutionTest(unittest.TestCase):
         self.assertEqual(200, restart.execution.start(task_id, {})[0])
         self.assertEqual(result, restart.execution.result(task_id))
         self.assertEqual(1, len(factory_calls))
+
+    def test_authorized_temporary_check_compares_frozen_base_on_the_normal_entrypoint(self):
+        class ReproductionModel:
+            step = 0
+
+            def decide(self, messages):
+                self.step += 1
+                if self.step == 1:
+                    return Decision('create_file', {'path': '.agent-checks/repro.py',
+                        'content': 'from calc import add\nassert add(2, 3) == 5\n'})
+                if self.step == 2:
+                    return Decision('replace_text', {'path': 'calc.py',
+                        'old_text': 'return a - b', 'new_text': 'return a + b'})
+                if self.step == 3:
+                    return Decision('run_tests', {'target': '.agent-checks/repro.py'})
+                feedback = latest_tool_result(messages)['data']
+                if self.step == 4:
+                    if (feedback['classification']['code'] != 'UNKNOWN' or feedback['execution']['exit_code'] != 0
+                            or not feedback['baseline']['failure_evidence']):
+                        raise AssertionError('Expected an unverified successful exit and a concrete base assertion failure')
+                    return Decision('run_tests', {'target': 'tests/test_calc.py'})
+                if not feedback['passed']:
+                    raise AssertionError('Expected the authorized repository test to pass')
+                return Decision('finish', {'answer': 'The repository test passed; the scratch check remains unverified.',
+                                           'outcome': 'incomplete', 'evidence': 'Repository test execution evidence.'})
+
+        self.service = self.service_for(ReproductionModel)
+        task_id = self.task(allowTemporaryChecks=True)
+        self.service.execution.start(task_id, {})
+        result = self.finish(task_id)
+        self.assertEqual('agent_reported_finished', result['stopReason'])
+        self.assertEqual('passed', result['finalChecks']['status'])
+        self.assertEqual(['calc.py'], result['review']['changedPaths'])
+        self.assertFalse((self.workspace(task_id) / '.agent-checks').exists())
 
     def test_async_global_exclusion_and_same_task_duplicate(self):
         entered, release = threading.Event(), threading.Event()
@@ -355,7 +390,7 @@ class ExecutionTest(unittest.TestCase):
                 result = self.finish(task_id)
                 self.assertEqual("failed", result["finalChecks"]["status"])
         task_id = self.task()
-        with patch("repo_agent.backend.services.task_execution_tools.ET.fromstring", side_effect=ValueError("corrupt fixture")):
+        with patch("repo_agent.core.check_execution.ET.fromstring", side_effect=ValueError("corrupt fixture")):
             self.service.execution.start(task_id, {})
             result = self.finish(task_id)
         self.assertIsNone(result["finalChecks"]["counts"])

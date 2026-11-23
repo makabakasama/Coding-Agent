@@ -74,8 +74,16 @@ def write_bytes(path, data):
 
 
 def read_json(path):
-    with path.open("rb") as stream:
-        data = stream.read(1024 * 1024 + 1)
+    # Windows replacement can briefly deny opening the destination as well.
+    for attempt in range(8):
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(1024 * 1024 + 1)
+            break
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(0.01 * 2 ** attempt)
     if len(data) > 1024 * 1024:
         raise ValueError("Oversized preparation record")
     return load_json(data)

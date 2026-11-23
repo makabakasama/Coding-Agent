@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from repo_agent.core.agent import Agent
+from repo_agent.core.context import latest_tool_result
 from repo_agent.core.decisions import Decision
 from repo_agent.core.tools import RepoTools
 
@@ -174,7 +175,7 @@ class SnapshotTest(unittest.TestCase):
                 if self.calls in (1, 4):
                     return Decision("read_file", {"path": "calc.py"})
                 if self.calls in (2, 5):
-                    read = json.loads(messages[-1]["content"])["data"]
+                    read = latest_tool_result(messages)["data"]
                     return Decision("replace_lines", {"snapshot_id": read["snapshot_id"], "start": 2, "end": 2,
                                                        "new_text": "    return a + b\n" if self.calls == 2 else "    return a - b\n"})
                 if self.calls == 3:

@@ -1,4 +1,4 @@
-# Coding Agent — V0.4 本地编码工作台
+# Coding Agent — 本地编码工作台
 
 面向学习和工程验证的 Coding Agent。输入本机项目、目录或文件路径及任务描述，由模型调用工具读取、搜索和修改代码，交付差异、检查结果、完成说明与运行记录。
 
@@ -6,12 +6,19 @@
 
 当前实现、检查结果与限制见 [V0.4 状态报告](docs/v0.4/status.md)。V0.3 和早期实验文档保留为历史记录，不作为当前启动说明。
 
+V0.5 已按当前范围收尾：新建文件、分页/范围搜索、上下文分层和步骤/证据已接入，指定离线验收通过；真实模型已完成一次 QQ Bot 跨文件编辑交付，该轮禁用测试，尚未独立验证业务效果。详见 [V0.5 阶段收尾](docs/v0.5/v0.5-status.md) 和 [执行上下文与步骤进度](docs/task-progress.md)。
+
+V0.6 已接入 Chat 后端与前端，默认首页为 Chat。可新建会话、连续问答、查看轮次及上下文材料；发送消息由独立 Worker 调用当前配置的模型。2026-11-11 的指定离线验收覆盖当时的纯文本能力，结果见 [Chat 验收记录](docs/v0.6/chat-acceptance-20261111.md)。之后已按授权接入同会话消息排队、项目只读工具，以及从 Chat 授权修改并关联现有编码任务的代码。2026-11-12 又接入讨论轮 token 预算估算、跨轮只读观察引用与可核对的旧轮裁剪记录；这些新增能力尚未运行测试。真实 Provider 的一条失败轨迹已留存，修复效果与 B3 评估索引仍待验证。
+
 ## 已有能力
+
+Evaluation 已接入 SWE Lite 的任务/补丁/官方评分接口代码，使用 `python -m repo_agent.evaluation`，详见 [小子集评估入口](evaluation/README.md)。2026-11-13 指定离线验收 11 passed，CLI 帮助入口 5/5 正常；尚未运行官方容器或真实模型评测，其他两类基准仍待适配。
 
 - **任务入口**：简化表单使用“本机路径 + 任务描述”，支持 Git 项目、子目录、普通目录和单文件；可选只读分析。高级表单保留阅读、修复和小功能三类契约。
 - **执行方式**：简化入口默认直接修改目标、50 步、不执行测试；Git 目标也可选固定 commit 的独立 worktree。完整契约未指定模式时沿用 worktree。普通目录和单文件的非 Git 目标使用直接模式。
 - **持久调度**：API 入队，独立 Worker 进程执行；默认 3 个线程槽位。重复提交同一轮不创建重复调度，相同根目录的直接任务串行执行。Worker 中断后保留材料并标记待核实，不自动续跑或重试。
 - **修改与交付**：快照编辑核对文件哈希；直接模式保存执行前基线和执行后哈希，支持冲突检查后的显式撤回。结果分别展示模型停止原因、需求完成状态、实际检查和范围审查。
+- **代码定位**：文件列表支持分页；字面搜索支持目录或单文件范围、续查及扫描完整性反馈。遇到数量限制、大文件或读取失败时展示覆盖缺口，行为见 [文件定位与搜索反馈](docs/code-discovery.md)。
 - **任务管理**：删除到回收站、恢复及二次确认后的彻底删除。删除记录不撤回源码修改；永久删除会清除该轮材料和经核对的专属 worktree。
 - **缓存与开发**：可选 Redis 读取缓存、PostgreSQL 连接池；API/Worker 支持开发自动重载，Worker 等待在途任务交付后重启。
 - **固定实验**：保留 G/R/P 修复流程与独立验收。历史 browser-use #5998、pydantic-ai #10525 两项已知答案实验有本机独立通过记录，不代表一般成功率或上游贡献。
@@ -22,9 +29,11 @@
 
 要求 Python 3.11+、Git、可用的 PostgreSQL 数据库；Redis 可选。目标项目的测试依赖需要单独准备。以下命令在项目根目录执行。
 
+本机默认 `coding-agent` Conda 环境已升级为 Python 3.12.14；后续 Evaluation 的 Harbor 0.25.0 要求 Python 3.12+。评估按固定小子集与预算运行，不预设全量基准资源。
+
 ```powershell
-python -m venv .venv
-.venv/Scripts/python.exe -m pip install -r requirements.txt
+conda activate coding-agent
+python -m pip install -r requirements.txt
 if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
 ```
 
@@ -38,20 +47,26 @@ if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
 
 ```powershell
 # 终端一：API，本文统一使用 4176，匹配任务 CLI 的默认端口
-.venv/Scripts/python.exe -m repo_agent.backend.app --port 4176
+conda activate coding-agent
+python -m repo_agent.backend.app --port 4176
 ```
 
 ```powershell
 # 终端二：独立 Worker，默认 3 个执行槽位
-.venv/Scripts/python.exe -m repo_agent.backend.worker --workers 3
+conda activate coding-agent
+python -m repo_agent.backend.worker --workers 3
 ```
+
+Chat 的 Worker 默认按声明的 128000 token 模型窗口估算输入预算，预留 2048 token 输出和 4096 token 额外空间；这不是自动发现的模型真实窗口。用 `--chat-context-tokens` 按所选模型调整，`--chat-tokenizer` 可指定 `tiktoken:<encoding>` 或 `hf:<本地 tokenizer.json>`。`auto` 仅适用于可识别的 GPT 系模型；其他模型须显式指定 tokenizer。兼容接口的聊天模板可能使本地计数与服务端用量有偏差，运行记录会标为估算。字节限制仅用于传输安全，不代表模型窗口。Chat 授权修改轮额外预留编码任务提示和工具增长空间；历史按预算选取后交给编码 Agent，实际编码循环每次决策继续检查预算。
+
+讨论轮不再固定 8 次模型决策；Worker 默认以 `--chat-max-turn-tokens 250000` 和 `--chat-max-turn-seconds 600` 限制单轮累计资源。token 用量为输入估算加每次预留的输出上限，实际 Provider 用量仍单独记录。接近预算时模型只可根据已读取内容回答，不再提供工具。
 
 打开 [本地工作台](http://127.0.0.1:4176)，填写路径和描述，保存后显式提交执行。仅保存需求不调用模型；Worker 启动后会领取数据库中已有的排队任务，可能随即调用模型。直接模式会修改你选择的本机目标，隔离模式需先准备 worktree。
 
 API 不传 `--port` 时默认 **4173**，任务 CLI 默认 **4176**；使用其他端口时需在 CLI 子命令前传相同的 `--port`。API 与 Worker 的自定义数据、项目、运行和副本目录必须一致。
 
 ```powershell
-.venv/Scripts/python.exe -m repo_agent.cli.task_cli --port 4176 list
+python -m repo_agent.cli.task_cli --port 4176 list
 ```
 
 简化路径入口会自动登记本机目标，不要求预先手写项目配置。已有项目配置继续兼容。原 `repo_agent.task_http`、`repo_agent.task_cli` 和 `repo_agent.import_task_history` 命令保留为薄入口；直接执行 CLI `python -m repo_agent` 继续兼容，不经过网页队列。
@@ -67,9 +82,10 @@ API 不传 `--port` 时默认 **4173**，任务 CLI 默认 **4176**；使用其�
 离线示例与测试使用合成仓库或注入模型：
 
 ```powershell
-.venv/Scripts/python.exe -m pip install pytest
-.venv/Scripts/python.exe -m examples.offline_smoke
-.venv/Scripts/python.exe -m pytest tests -q
+conda activate coding-agent
+python -m pip install pytest
+python -m examples.offline_smoke
+python -m pytest tests -q
 node --test frontend/tests/task-ui.test.cjs
 ```
 

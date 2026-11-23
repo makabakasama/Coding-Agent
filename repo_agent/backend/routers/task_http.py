@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import socket
+import time
 from urllib.parse import urlsplit, parse_qs
 import re
 
@@ -31,6 +32,7 @@ class TaskHandler(BaseHTTPRequestHandler):
     def _send(self, status, body: bytes, content_type, headers=None):
         self.send_response(status)
         for key, value in {"Content-Type": content_type, "Content-Length": str(len(body)),
+                           "Connection": "close",
                            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                            "Referrer-Policy": "no-referrer", **(headers or {})}.items():
             self.send_header(key, value)
@@ -79,6 +81,41 @@ class TaskHandler(BaseHTTPRequestHandler):
     def _dispatch(self):
         self._local_request()
         path = urlsplit(self.path).path
+        if path == '/api/conversations' or path.startswith('/api/conversations/'):
+            from repo_agent.backend.routers.chat_http import dispatch_chat
+            dispatch_chat(self, path)
+            return
+        if path == '/api/local-files':
+            if self.command != 'GET':
+                raise TaskError(405, 'METHOD_NOT_ALLOWED', '文件浏览仅支持读取')
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            if set(query) - {'path'} or any(len(values) != 1 for values in query.values()):
+                raise TaskError(400, 'INVALID_TARGET', '浏览路径无效')
+            root = Path(__file__).resolve().parents[4]
+            requested = query.get('path', [str(root)])[0]
+            try:
+                directory = Path(requested).resolve(strict=True)
+                relative = directory.relative_to(root)
+                if '.git' in relative.parts or not directory.is_dir():
+                    raise ValueError('Not a directory')
+            except (OSError, ValueError) as exc:
+                raise TaskError(400, 'INVALID_TARGET', '只能浏览工作目录内的文件夹') from exc
+            from repo_agent.core.tools import TEXT_EXT
+            try:
+                entries = sorted(
+                    ({'name': item.name, 'path': str(item), 'type': 'directory' if item.is_dir() else 'file'}
+                     for item in directory.iterdir()
+                     if item.name != '.git' and not item.is_symlink()
+                     and item.resolve().is_relative_to(root)
+                     and (item.is_dir() or item.is_file() and item.suffix.lower() in TEXT_EXT)),
+                    key=lambda item: (item['type'] != 'directory', item['name'].lower()),
+                )
+            except OSError as exc:
+                raise TaskError(400, 'INVALID_TARGET', '无法读取该文件夹') from exc
+            self._json(200, {'root': str(root), 'path': str(directory),
+                             'parent': str(directory.parent) if directory != root else None,
+                             'entries': entries[:500], 'truncated': len(entries) > 500})
+            return
         purge = re.fullmatch(r'/api/tasks/([^/]+)/purge', path)
         if purge:
             if self.command not in ('GET', 'POST'):
@@ -234,7 +271,8 @@ class TaskHandler(BaseHTTPRequestHandler):
                 self._json(200, self.service.get(path[len("/api/tasks/"):]))
             return
         assets = {"/": ("index.html", "text/html"), "/index.html": ("index.html", "text/html"),
-                  "/app.js": ("app.js", "text/javascript"), "/styles.css": ("styles.css", "text/css")}
+                  "/app.js": ("app.js", "text/javascript"), "/chat.js": ("chat.js", "text/javascript"),
+                  "/styles.css": ("styles.css", "text/css")}
         if path in assets:
             if self.command not in ("GET", "HEAD"):
                 self._json(405, TaskError(405, "METHOD_NOT_ALLOWED", "静态资源只支持读取").response(), {"Allow": "GET, HEAD"})
@@ -270,6 +308,29 @@ class TaskHTTPServer(ThreadingHTTPServer):
     # Windows otherwise permits two HTTP servers to bind the same port, so a
     # successful bind can still send the browser to an old static server.
     allow_reuse_address = False
+
+    def shutdown_request(self, request):
+        # HTTP/1.0 closes each connection. After an early rejection, unread
+        # upload data can turn an immediate full close into a TCP reset and
+        # discard the response. Half-close first, then linger within both caps.
+        try:
+            request.shutdown(socket.SHUT_WR)
+            deadline = time.monotonic() + 0.25
+            remaining = 65537  # Include the first byte beyond the accepted 64 KiB body.
+            while remaining:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                request.settimeout(timeout)
+                chunk = request.recv(min(8192, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            # Peer disconnects and the bounded read timeout still require close.
+            pass
+        finally:
+            self.close_request(request)
 
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):

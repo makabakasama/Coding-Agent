@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from examples import browser_use_5998 as entry
 from repo_agent.core.agent import Agent
+from repo_agent.core.context import latest_tool_result
 from repo_agent.core.decisions import Decision
 from repo_agent.experimentation.experiments import ExperimentSpec, _sha
 from repo_agent.core.provider import ProviderError
@@ -31,7 +32,7 @@ class FixtureModel:
         if self.calls == 1:
             return Decision("read_file", {"path": "test_calc.py" if self.mode == "protected" else "calc.py"})
         if self.calls == 2:
-            observation = json.loads(messages[-1]["content"])
+            observation = latest_tool_result(messages)
             text = "    return a * b\n" if self.mode == "wrong" else "    return a + b\n"
             line = 2
             if self.mode == "protected":

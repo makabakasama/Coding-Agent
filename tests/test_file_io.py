@@ -46,6 +46,28 @@ class AtomicJsonTest(unittest.TestCase):
         self.assertEqual({'steps': 7}, read_json(self.path))
         self.assertEqual([], list(self.root.glob('*.tmp')))
 
+    def test_transient_read_denial_recovers_without_changing_saved_state(self):
+        original = Path.open
+        attempts = []
+
+        def open_record(path, *args, **kwargs):
+            attempts.append(path)
+            if len(attempts) < 3:
+                raise PermissionError('temporarily replacing destination')
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, 'open', open_record), patch('repo_agent.infrastructure.file_io.time.sleep') as sleep:
+            self.assertEqual({'steps': 7}, read_json(self.path))
+        self.assertEqual(3, len(attempts))
+        self.assertEqual(2, sleep.call_count)
+
+    def test_permanent_read_denial_remains_an_error_after_bounded_retries(self):
+        with patch.object(Path, 'open', side_effect=PermissionError('denied')) as opener:
+            with patch('repo_agent.infrastructure.file_io.time.sleep') as sleep, self.assertRaises(PermissionError):
+                read_json(self.path)
+        self.assertEqual(8, opener.call_count)
+        self.assertEqual(7, sleep.call_count)
+
     @unittest.skipUnless(os.name == 'nt', 'Windows file sharing semantics')
     def test_windows_open_reader_can_overlap_state_update(self):
         with ThreadPoolExecutor(max_workers=1) as pool:

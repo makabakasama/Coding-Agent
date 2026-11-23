@@ -207,8 +207,10 @@ class DatabaseTaskStore(ProjectTaskStore):
                             '任务已存入数据库，本地材料生成失败，读取该任务可重试生成') from exc
         return directory
 
-    def create(self, build_record, *, requirement=None):
-        task_id = uuid.uuid4().hex
+    def create(self, build_record, *, requirement=None, task_id=None):
+        task_id = task_id or uuid.uuid4().hex
+        if not TASK_ID.fullmatch(task_id):
+            raise ValueError('Invalid preallocated task id')
         record = build_record(task_id)
         validate_record(record, task_id)
         contract = record['contract']

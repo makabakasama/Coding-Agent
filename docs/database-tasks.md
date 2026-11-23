@@ -1,9 +1,9 @@
 # PostgreSQL 任务记录
 
-安装依赖后，在项目根目录 `.env` 中配置连接地址。
+先运行 `conda activate coding-agent`，安装依赖后在项目根目录 `.env` 中配置连接地址。
 
 ```powershell
-.venv/Scripts/python.exe -m pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ```dotenv
@@ -15,7 +15,7 @@ DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/coding_agent
 按原来的命令启动网页服务。
 
 ```powershell
-.venv/Scripts/python.exe -m repo_agent.task_http
+python -m repo_agent.task_http
 ```
 
 配置连接地址后，新需求及第一轮记录在同一个 PostgreSQL 事务中提交。新增轮次通过外键关联原需求。`tasks.record` 保存需求 JSON，`task_runs.record` 保存轮次任务 JSON，`metadata` 保存目录关联信息。数据库同时由 task_dispatch 保存调度状态、领取与心跳，task_trash 保存回收站状态；细粒度执行事件、结果、Diff 和撤回材料仍由文件提供。
@@ -27,13 +27,13 @@ DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/coding_agent
 离线检查可运行以下命令。
 
 ```powershell
-.venv/Scripts/python.exe -m pytest tests/test_database_task_store.py tests/test_tasks.py tests/test_project_task_store.py tests/test_config.py -q
+python -m pytest tests/test_database_task_store.py tests/test_tasks.py tests/test_project_task_store.py tests/test_config.py -q
 ```
 
 真实数据库测试单独读取环境变量 `CODING_AGENT_TEST_DATABASE_URL`，应指向专用测试库。测试会建表、写入随机命名需求、验证服务对象重建后的读取和文件恢复，并在结束时删除本次数据库记录。未配置时跳过该项。
 
 ```powershell
-.venv/Scripts/python.exe -m pytest tests/test_database_task_store.py -q
+python -m pytest tests/test_database_task_store.py -q
 ```
 
 ## 导入已有记录
@@ -41,7 +41,7 @@ DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/coding_agent
 配置 `DATABASE_URL` 后运行历史导入命令。
 
 ```powershell
-.venv/Scripts/python.exe -m repo_agent.import_task_history
+python -m repo_agent.import_task_history
 ```
 
 导入在一个事务中完成。普通需求与轮次保留原编号及实际目录，旧格式轮次的原始元数据保持原样。登记实验的需求、轮次及验收视图保存到 `experiment_tasks`、`experiment_rounds`。报告、日志、补丁和需求初始材料的原始字节、相对路径与 SHA256 保存到 `historical_materials`。`experiment_locations` 登记环境和工作副本位置，源码副本、解释器和依赖环境继续保存在文件系统中。

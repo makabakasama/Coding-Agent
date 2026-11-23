@@ -17,7 +17,8 @@ ENTRY_SOURCES = ("examples/browser_use_5998.py", "examples/pydantic_ai_10525.py"
 SOURCE_PACKAGES = ("repo_agent", "repo_agent/core", "repo_agent/backend",
                    "repo_agent/backend/routers", "repo_agent/backend/services",
                    "repo_agent/backend/repositories", "repo_agent/backend/schemas",
-                   "repo_agent/infrastructure", "repo_agent/experimentation", "repo_agent/cli")
+                   "repo_agent/infrastructure", "repo_agent/experimentation", "repo_agent/cli",
+                   "repo_agent/evaluation")
 SOURCE_SCOPE = [*(name + "/*.py (direct children only)" for name in SOURCE_PACKAGES), *ENTRY_SOURCES]
 
 

@@ -1,0 +1,5 @@
+# Install only when preparing the external grading environment, not on import.
+# Official wheel SHA256 (metadata checked):
+# b7f0416a1e686eca22c2f749b5f816685a202835032f6683080e2b53545bbb62
+# Transitive dependencies must be captured after environment preparation.
+swebench==5.0.2

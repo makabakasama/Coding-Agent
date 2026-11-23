@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import re
+import stat
 import subprocess
 from pathlib import Path
-import xml.etree.ElementTree as ET
 
 from repo_agent.backend.schemas.task_contract import _relative_path
+from repo_agent.core.check_tools import CHECK_PREFIX, CheckToolRouting, run_independent_checks
 from repo_agent.core.tools import RepoTools
 
 
@@ -23,12 +24,13 @@ def protected(path, targets):
             or any(path == t.split("::", 1)[0] or path.startswith(t.split("::", 1)[0] + "/") for t in targets))
 
 
-class TaskRepoTools(RepoTools):
+class TaskRepoTools(CheckToolRouting, RepoTools):
     def __init__(self, root, *, contract, excluded_roots=(), **kwargs):
         self.excluded_roots = tuple(Path(path).resolve() for path in excluded_roots)
         super().__init__(root, allow_writes=contract["kind"] != "read_code", allow_tests=contract["allowTests"],
                          allow_ignored_test_logs=contract.get('workspaceMode') == 'direct', **kwargs)
         self.contract = contract
+        self.checks = None
         self.scopes = [(p, (self.root / p).is_dir()) for p in contract["allowedPaths"]]
 
     def _path(self, rel):
@@ -47,7 +49,12 @@ class TaskRepoTools(RepoTools):
     def _iter_files(self, directory, limit=1500):
         if self.contract.get('targetFile'):
             path=self._path(self.contract['targetFile'])
-            if path.is_file() and path.is_relative_to(directory):
+            try:
+                info = path.stat()
+            except OSError:
+                self._enumeration_errors += 1
+                return
+            if stat.S_ISREG(info.st_mode) and path.is_relative_to(directory):
                 yield path
             return
         if self.contract.get('workspaceMode') == 'direct' and self.contract.get('sourceKind') != 'directory':
@@ -60,18 +67,48 @@ class TaskRepoTools(RepoTools):
                     path = self._path(relative)
                 except ValueError:
                     continue
-                if path.is_relative_to(directory) and path.is_file() and path.suffix.lower() in TEXT_EXT:
+                if not path.is_relative_to(directory) or path.suffix.lower() not in TEXT_EXT:
+                    continue
+                try:
+                    info = path.stat()
+                except OSError:
+                    self._enumeration_errors += 1
+                    continue
+                if stat.S_ISREG(info.st_mode):
                     yield path
                     count += 1
-                    if count >= limit:
+                    if limit is not None and count >= limit:
                         break
             return
-        for path in super()._iter_files(directory, limit):
+        count = 0
+        for path in super()._iter_files(directory, limit=None):
             try:
                 self._path(path.relative_to(self.root).as_posix())
             except ValueError:
                 continue
             yield path
+            count += 1
+            if limit is not None and count >= limit:
+                break
+
+    def _query_state(self, tool, scope, query, cursor):
+        target = self._query_path(scope)
+        if (target.is_file() and self.contract.get('workspaceMode') == 'direct'
+                and self.contract.get('sourceKind') != 'directory'):
+            listed = subprocess.run(['git', '-C', str(self.root), 'ls-files', '--cached', '--others',
+                                     '--exclude-standard', '-z', '--', ':(literal)' + scope],
+                                    capture_output=True, timeout=15)
+            if listed.returncode != 0:
+                raise ValueError('Cannot inspect Git query scope')
+            if scope not in listed.stdout.decode('utf-8').split('\0'):
+                raise ValueError('Query file is outside the visible Git scope')
+        return super()._query_state(tool, scope, query, cursor)
+
+    def _query_visibility(self):
+        return {**super()._query_visibility(),
+                'git_ignored_untracked_excluded': self.contract.get('workspaceMode') == 'direct'
+                    and self.contract.get('sourceKind') != 'directory',
+                'target_file': self.contract.get('targetFile')}
 
     def editable(self, path):
         self._path(path)
@@ -110,53 +147,39 @@ class TaskRepoTools(RepoTools):
                 raise PermissionError("Unsupported patch header")
         return {**super().apply_patch(patch, expected_file=expected_file), "paths": paths}
 
-    def run_tests(self, target="."):
+    def create_file(self, path, content):
+        if not self.editable(path):
+            raise PermissionError("Creation exceeds allowed business-code scope")
+        return super().create_file(path, content)
+
+    def run_tests(self, target=".", review=None, independent_targets=None):
+        if independent_targets:
+            if self.checks is None:
+                raise PermissionError("Independent checks require the developer-check runner")
+            return run_independent_checks(self.run_tests, target, independent_targets, review)
         if getattr(self, "policy_check", lambda: True)() is not True:
             raise PermissionError("Workspace identity or scope audit failed")
-        if target not in self.contract["checkTargets"]:
+        if not self.allow_tests:
+            raise PermissionError("Tests are not authorized")
+        if not isinstance(target, str) or not target or len(target) > 220:
+            raise ValueError("Invalid test target")
+        temporary = target.startswith(CHECK_PREFIX) and self.checks is not None and self.checks.files is not None
+        if target not in self.contract["checkTargets"] and not temporary:
             raise PermissionError("Only frozen checkTargets may be run")
-        result = super().run_tests(target)
-        counts = None
-        try:
-            report = Path(result["test_log"]["directory"]) / "report.xml"
-            raw = report.read_bytes()
-            if self.test_output_filter is not None:
-                filtered = self.test_output_filter(raw)
-                if filtered != raw:
-                    report.write_bytes(filtered)
-                raw = filtered
-            if len(raw) > 2 * 1024 * 1024 or b"<!DOCTYPE" in raw:
-                raise ValueError("Invalid JUnit report")
-            tree = ET.fromstring(raw)
-            suites = [tree] if tree.tag == "testsuite" else list(tree.findall("testsuite"))
-            if not suites:
-                raise ValueError("Missing JUnit testsuites")
-            values = {key: sum(int(s.attrib[key]) for s in suites) for key in ("tests", "failures", "errors", "skipped")}
-            passed = values["tests"] - values["failures"] - values["errors"] - values["skipped"]
-            if min(*values.values(), passed) < 0:
-                raise ValueError("Inconsistent JUnit counts")
-            counts = {"total": values["tests"], "passed": passed, "failed": values["failures"],
-                      "errors": values["errors"], "skipped": values["skipped"]}
-        except (KeyError, OSError, ValueError, ET.ParseError):
-            pass
-        status, reason = "failed", None
-        if result.get("error"):
-            reason = "TEST_TIMEOUT" if result.get("timed_out") else "TEST_EXECUTION_OR_LOG_ERROR"
-        elif counts is None:
-            reason = "TEST_COUNTS_UNAVAILABLE"
-        elif not counts["total"]:
-            reason = "NO_TESTS_COLLECTED"
-        elif result.get("exit_code") != 0 or counts["failed"] or counts["errors"]:
-            reason = "TEST_FAILURE"
-        elif counts["passed"] == 0:
-            status, reason = "skipped", "ALL_TESTS_SKIPPED"
-        else:
-            status = "passed"
-        result.update(counts=counts, check_status=status, check_reason=reason, passed=status == "passed")
+        if self.checks is not None:
+            return self.checks.run(target, review=review)
+        return self._run_authorized_check(target)
+
+    def _run_authorized_check(self, target, *, scratch=None, changed_python=(),
+                              source_version=None, environment_version=None):
+        result = super().run_tests(target, scratch=scratch, changed_python=changed_python,
+                                   source_version=source_version, environment_version=environment_version)
+        if not result.get('check_reason') and not result['passed']:
+            result['check_reason'] = result.get('failure_kind') or result.get('error')
         return result
 
     def execute(self, action, args):
-        if action in ("apply_patch", "replace_text", "replace_lines", "run_tests"):
+        if action in ("apply_patch", "replace_text", "replace_lines", "create_file", "run_tests"):
             try:
                 if getattr(self, "policy_check", lambda: True)() is not True:
                     return {"ok": False, "error": "Workspace identity or scope audit failed; mutation/test blocked"}

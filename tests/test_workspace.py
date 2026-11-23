@@ -6,6 +6,7 @@ import unittest
 
 from examples.live_llm_smoke import run_smoke
 from repo_agent.core.decisions import Decision
+from repo_agent.core.context import latest_tool_result
 from repo_agent.core.workspace import create_worktree
 
 
@@ -46,7 +47,7 @@ class WorkspaceTest(unittest.TestCase):
                 self.calls += 1
                 if self.calls == 1:
                     return Decision("list_files", {"subdir": "."})
-                observation = json.loads(messages[-1]["content"])
+                observation = latest_tool_result(messages)
                 return Decision("finish", {"answer": observation["data"]["files"][0]})
         with tempfile.TemporaryDirectory() as directory:
             self.assertTrue(run_smoke(ObservationModel(), Path(directory))["smoke_passed"])

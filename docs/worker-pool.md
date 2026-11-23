@@ -4,16 +4,16 @@ API 与 Worker 是两个独立进程，共用 PostgreSQL 和本机的任务、�
 
 ## 启动
 
-在 `.env` 中配置 `DATABASE_URL` 和模型配置，再启动 API。简化路径入口会自动登记本机目标；也可使用已有项目配置。
+在 `.env` 中配置 `DATABASE_URL` 和模型配置；两个终端均先运行 `conda activate coding-agent`，再启动服务。简化路径入口会自动登记本机目标；也可使用已有项目配置。
 
 ```powershell
-.venv/Scripts/python.exe -m repo_agent.backend.app --port 4173
+python -m repo_agent.backend.app --port 4173
 ```
 
 在另一个终端启动 Worker。
 
 ```powershell
-.venv/Scripts/python.exe -m repo_agent.backend.worker --workers 3
+python -m repo_agent.backend.worker --workers 3
 ```
 
 两条命令均在项目根目录运行。本文使用 API 默认端口 4173；任务 CLI 默认 4176，连接本例需显式指定 `--port 4173`。根 README 统一示例使用 4176。自定义目录时，两个进程的 `--data-dir`、`--projects`、`--workspace-root`、`--runs-root` 和 `--project-workspaces` 应保持一致。API 和 Worker 启动均要求数据库配置。
@@ -23,8 +23,8 @@ Worker 终端输出包含时间、线程名、任务 ID、执行 ID、领取、�
 开发时可使用自动重载入口，首次启用需用以下命令重新启动对应服务。
 
 ```powershell
-.venv/Scripts/python.exe -m repo_agent.backend.app --port 4173 --reload
-.venv/Scripts/python.exe -m repo_agent.backend.worker --workers 3 --reload
+python -m repo_agent.backend.app --port 4173 --reload
+python -m repo_agent.backend.worker --workers 3 --reload
 ```
 
 这两条命令分别在两个终端运行。监控范围包括 `repo_agent` 各已登记子包、登记的实验入口、项目配置及 `.env`。修改后 API 等待当前请求结束再重启，Worker 停止领取并等待已领取任务交付后重启。重启日志会显示等待与加载过程。HTML/CSS/JavaScript 由服务直接读取，修改这些文件后刷新浏览器即可加载。`--reload` 适用于本机开发，已领取任务较长时会等其结束后再加载代码。
@@ -81,7 +81,7 @@ Worker 使用 PostgreSQL 会话锁限制同一任务目录只有一个池。每�
 `tests/test_task_queue.py` 在显式配置 `CODING_AGENT_TEST_DATABASE_URL` 时使用真实 PostgreSQL、独立 Worker 子进程、临时 Git 仓库及本地注入模型决策。覆盖重复点击、API 重建、3 槽并发上限、Worker 强制退出、材料保留、心跳失效及单池互斥。测试会清理本次随机需求的数据库记录。
 
 ```powershell
-.venv/Scripts/python.exe -m pytest tests/test_task_queue.py -q
+python -m pytest tests/test_task_queue.py -q
 node --test frontend/tests/task-ui.test.cjs
 ```
 

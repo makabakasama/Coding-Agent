@@ -19,12 +19,17 @@ class TaskService:
         self.store.close()
 
     def __init__(self, store: TaskStore, projects: TaskProjects, *, workspace_root=None,
-                 model_factory=None, project_root=None, experiment_runner_factory=None):
+                 model_factory=None, project_root=None, experiment_runner_factory=None,
+                 chat_model_factory=None, chat_token_counter_factory=None):
         self.store, self.projects = store, projects
         self.preparation = TaskPreparation(store, projects, workspace_root or Path(__file__).resolve().parents[3] / "experiments/tasks")
-        self.execution = TaskExecution(store, projects, self.preparation, model_factory=model_factory)
+        self.execution = TaskExecution(store, projects, self.preparation,
+                                       model_factory=model_factory,
+                                       token_counter_factory=chat_token_counter_factory)
         root = Path(project_root or Path(__file__).resolve().parents[3]).resolve()
         self.history = TaskHistory(root)
+        self.chat = None
+        self.chat_execution = None
         from repo_agent.backend.repositories.database_task_store import DatabaseTaskStore
         if isinstance(store, DatabaseTaskStore):
             from repo_agent.backend.repositories.database_task_history import DatabaseTaskHistory
@@ -32,6 +37,14 @@ class TaskService:
             from repo_agent.backend.services.queued_execution import QueuedExecution
             self.history = DatabaseTaskHistory(root, store)
             self.execution = QueuedExecution(self.execution, TaskQueue(store))
+            from repo_agent.backend.repositories.chat_store import ChatStore
+            from repo_agent.backend.services.chat_service import ChatService
+            from repo_agent.backend.services.chat_execution import ChatExecution
+            self.chat = ChatService(ChatStore(store), projects)
+            self.chat.execution = self.execution
+            self.chat_execution = ChatExecution(self.chat.store, projects=projects, task_service=self,
+                                                model_factory=chat_model_factory,
+                                                token_counter_factory=chat_token_counter_factory)
         self.experiments = ExperimentRuns(root, store, self.history, runner_factory=experiment_runner_factory)
         from repo_agent.backend.services.task_undo import TaskUndo
         self.undo = TaskUndo(self.execution)
@@ -45,11 +58,27 @@ class TaskService:
             raise TaskError(400, "VALIDATION_ERROR", "准备请求须为空 JSON 对象")
         return self.preparation.query(task_id, prepare=True)
 
-    def create(self, value, *, requirement=None) -> dict:
+    def create(self, value, *, requirement=None, task_id=None) -> dict:
         if isinstance(value,dict) and 'instruction' in value:
             from repo_agent.backend.services.simple_submission import SimpleSubmission
             value = SimpleSubmission(self.projects).normalize(value)
         contract = validate_contract(value)
+        if task_id is not None:
+            from repo_agent.backend.schemas.task_contract import TASK_ID
+            if not TASK_ID.fullmatch(task_id):
+                raise TaskError(400, 'VALIDATION_ERROR', '预分配任务编号无效')
+            try:
+                previous = self.store.get(task_id)
+            except TaskError as exc:
+                if exc.code != 'TASK_NOT_FOUND':
+                    raise
+            else:
+                frozen = dict(previous['contract'])
+                frozen['revision'] = frozen.pop('requestedRevision')
+                frozen.pop('baseCommit')
+                if frozen != contract:
+                    raise TaskError(409, 'TASK_ID_REUSED', '预分配任务编号已有不同执行契约')
+                return previous
         configured = self.projects._projects().get(contract['projectId'])
         if configured and contract.get('sourceKind','git') != configured.get('sourceKind','git'):
             raise TaskError(400,'INVALID_TARGET_TYPE','目标类型与本机登记不一致')
@@ -62,6 +91,11 @@ class TaskService:
                     "status": "created", "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "contract": contract}
 
+        if task_id is not None:
+            from repo_agent.backend.repositories.database_task_store import DatabaseTaskStore
+            if not isinstance(self.store, DatabaseTaskStore):
+                raise TaskError(409, 'DATABASE_REQUIRED', '会话执行需使用持久任务仓储')
+            return self.store.create(build, requirement=requirement, task_id=task_id)
         return self.store.create(build, requirement=requirement) if requirement is not None else self.store.create(build)
 
     def ordinary_tasks(self, project):

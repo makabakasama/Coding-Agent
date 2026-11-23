@@ -13,7 +13,8 @@ import sys
 import tempfile
 
 from repo_agent.core.decisions import Decision
-from repo_agent.backend.routers.task_http import create_server
+from repo_agent.core.context import latest_tool_result
+from repo_agent.backend.app import create_server
 from repo_agent.backend.repositories.task_projects import TaskProjects
 from repo_agent.backend.services.task_service import TaskService
 from repo_agent.backend.repositories.task_store import TaskStore
@@ -28,7 +29,7 @@ class FixtureModel:
         if self.step == 1:
             return Decision("read_file", {"path": "calc.py"})
         if self.step == 2:
-            observation = json.loads(messages[-1]["content"])
+            observation = latest_tool_result(messages)
             return Decision("replace_lines", {"snapshot_id": observation["data"]["snapshot_id"],
                                                "start": 2, "end": 2, "new_text": "    return a + b\n"})
         return Decision("finish", {"answer": "离线脚本已将减法改为加法；最终检查由后端独立运行。"})

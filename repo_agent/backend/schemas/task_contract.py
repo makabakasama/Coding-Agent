@@ -55,7 +55,8 @@ def validate_contract(value) -> dict:
     if not isinstance(value, dict):
         raise TaskError(400, "VALIDATION_ERROR", "任务必须是 JSON 对象")
     required = {"projectId", "revision", "current", "expected", "allowedPaths", "allowTests", "checkTargets"}
-    allowed = required | {"kind", "maxSteps", "workspaceMode", "sourceKind", "targetFile"}
+    allowed = required | {"kind", "maxSteps", "workspaceMode", "sourceKind", "targetFile",
+                          "conversationContext", "allowTemporaryChecks"}
     errors = []
 
     def error(field, message):
@@ -66,7 +67,7 @@ def validate_contract(value) -> dict:
     for key in sorted(value.keys() - allowed):
         error(key, "不支持的字段")
     result = {}
-    for key, limit in (("projectId", 64), ("revision", 160), ("current", 4000), ("expected", 4000)):
+    for key, limit in (("projectId", 64), ("revision", 160), ("current", 8000), ("expected", 8000)):
         text = value.get(key)
         if type(text) is not str:
             error(key, "必须是字符串")
@@ -79,6 +80,13 @@ def validate_contract(value) -> dict:
         if key == "revision" and (text.startswith("-") or _controls(text)):
             error(key, "版本引用格式不正确")
         result[key] = text
+    if 'conversationContext' in value:
+        context = value['conversationContext']
+        if (type(context) is not str or not 1 <= len(context) <= 250_000
+                or any(0xD800 <= ord(char) <= 0xDFFF for char in context)):
+            error('conversationContext', '须为最多 250000 字符的有效会话上下文')
+        else:
+            result['conversationContext'] = context
     if 'sourceKind' in value:
         result['sourceKind'] = value['sourceKind']
         if value['sourceKind'] not in ('git','directory'):
@@ -102,6 +110,13 @@ def validate_contract(value) -> dict:
     result["allowTests"] = value.get("allowTests")
     if type(result["allowTests"]) is not bool:
         error("allowTests", "必须是布尔值")
+    if "allowTemporaryChecks" in value:
+        temporary = value["allowTemporaryChecks"]
+        if type(temporary) is not bool:
+            error("allowTemporaryChecks", "必须是布尔值")
+        elif temporary and (result["allowTests"] is not True or result["kind"] == "read_code"):
+            error("allowTemporaryChecks", "仅允许已授权测试的编码任务执行临时 Python 自测")
+        result["allowTemporaryChecks"] = temporary
     for key, count, length in (("allowedPaths", 100, 500), ("checkTargets", 20, 220)):
         entries = value.get(key)
         result[key] = []
@@ -127,7 +142,7 @@ def validate_contract(value) -> dict:
         error("allowedPaths", "阅读任务不允许修改，路径数组必须为空")
     elif result["kind"] != "read_code" and not result["allowedPaths"]:
         error("allowedPaths", "至少指定一个允许修改路径")
-    if result["allowTests"] is True and not result["checkTargets"]:
+    if result["allowTests"] is True and not result["checkTargets"] and not result.get("allowTemporaryChecks"):
         error("checkTargets", "允许运行测试时必须指定检查目标")
     if result["allowTests"] is False and result["checkTargets"]:
         error("checkTargets", "不允许测试时检查目标必须为空")
@@ -150,7 +165,8 @@ def validate_record(record, task_id: str) -> None:
             raise ValueError("Invalid timestamp")
         datetime.fromisoformat(stamp[:-1] + "+00:00")
         contract = record["contract"]
-        if type(contract) is not dict or set(contract) - {"workspaceMode", "sourceKind", "targetFile"} != {
+        if type(contract) is not dict or set(contract) - {"workspaceMode", "sourceKind", "targetFile",
+                                                   "conversationContext", "allowTemporaryChecks"} != {
                 "projectId", "requestedRevision", "baseCommit", "kind", "current", "expected",
                 "allowedPaths", "allowTests", "checkTargets", "maxSteps"}:
             raise ValueError("Invalid contract")

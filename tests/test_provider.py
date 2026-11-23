@@ -11,6 +11,8 @@ from repo_agent.core.agent import Agent
 from repo_agent.core.decisions import Decision, DecisionError, parse_tool_decision
 from repo_agent.core.provider import OpenAICompatibleProvider, ProviderError
 from repo_agent.core.tools import RepoTools
+from repo_agent.backend.services.task_execution import RecordedAgent
+from repo_agent.infrastructure.redaction import Redactor
 
 
 def response(message, finish_reason="tool_calls"):
@@ -63,7 +65,7 @@ class ProviderTest(unittest.TestCase):
             requests.append(payload)
             if len(requests) == 1:
                 return response(first)
-            history = payload["messages"]
+            history = payload["messages"][:-1]
             self.assertEqual(first, history[-2])
             self.assertEqual("tool", history[-1]["role"])
             self.assertEqual("call_list", history[-1]["tool_call_id"])
@@ -76,6 +78,34 @@ class ProviderTest(unittest.TestCase):
             self.assertTrue(run_smoke(self.provider, Path(directory))["smoke_passed"])
         self.assertEqual(2, len(requests))
 
+    def test_discovery_tools_advertise_and_round_trip_paging_arguments(self):
+        for action, args in (("list_files", {"subdir": "src", "cursor": "page_token", "limit": 20}),
+                             ("search_code", {"query": "def add", "path": "src/calc.py", "cursor": "", "limit": 10})):
+            with self.subTest(action=action):
+                message = Decision(action, args).assistant_message
+                with patch("repo_agent.core.provider.urllib.request.urlopen", return_value=response(message)) as request:
+                    decision = self.provider.decide([])
+                self.assertEqual(args, decision.args)
+                sent = json.loads(request.call_args.args[0].data)
+                schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in sent["tools"]}
+                self.assertEqual(500, schemas["list_files"]["properties"]["limit"]["maximum"])
+                self.assertEqual(50, schemas["search_code"]["properties"]["limit"]["maximum"])
+                self.assertEqual(64, schemas[action]["properties"]["cursor"]["maxLength"])
+                self.assertEqual(["query"], schemas["search_code"]["required"])
+
+    def test_discovery_arguments_reject_invalid_limits_paths_and_cursors_before_execution(self):
+        for action, valid in (("list_files", {}), ("search_code", {"query": "marker"})):
+            upper = 500 if action == "list_files" else 50
+            scope_name = "subdir" if action == "list_files" else "path"
+            message = Decision(action, valid).assistant_message
+            for invalid in ({"limit": 0}, {"limit": upper + 1}, {"limit": True},
+                            {"limit": "1"}, {"cursor": None}, {"cursor": "x" * 65},
+                            {scope_name: ""}, {"offset": 1}):
+                with self.subTest(action=action, invalid=invalid), self.assertRaises(DecisionError):
+                    bad = deepcopy(message)
+                    bad["tool_calls"][0]["function"]["arguments"] = json.dumps({**valid, **invalid})
+                    parse_tool_decision(bad)
+
     def test_invalid_arguments_are_rejected_and_can_be_corrected(self):
         bad = Decision("read_file", {"path": "sample.py"}, "call_bad").assistant_message
         bad["tool_calls"][0]["function"]["arguments"] = '{"path": "sample.py"'
@@ -86,11 +116,12 @@ class ProviderTest(unittest.TestCase):
             requests.append(payload)
             if len(requests) == 1:
                 return response(bad)
-            feedback = payload["messages"][-1]
+            history = payload["messages"][:-1]
+            feedback = history[-1]
             self.assertEqual("tool", feedback["role"])
             self.assertEqual("call_bad", feedback["tool_call_id"])
             self.assertFalse(json.loads(feedback["content"])["ok"])
-            self.assertEqual(bad, payload["messages"][-2])
+            self.assertEqual(bad, history[-2])
             return response(Decision("finish", {"answer": "Cannot proceed."}).assistant_message)
 
         with tempfile.TemporaryDirectory() as directory, patch(
@@ -120,8 +151,9 @@ class ProviderTest(unittest.TestCase):
             requests.append(payload)
             if len(requests) == 1:
                 return response(batch)
-            self.assertEqual(batch, payload["messages"][-3])
-            feedback = payload["messages"][-2:]
+            history = payload["messages"][:-1]
+            self.assertEqual(batch, history[-3])
+            feedback = history[-2:]
             self.assertEqual(["first", "second"], [item["tool_call_id"] for item in feedback])
             self.assertTrue(all(item["role"] == "tool" and not json.loads(item["content"])["ok"]
                                 for item in feedback))
@@ -197,3 +229,42 @@ class ProviderTest(unittest.TestCase):
                              ("apply_patch", {"patch": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"})):
             with self.subTest(action=action), self.assertRaises(DecisionError):
                 parse_tool_decision(Decision(action, args).assistant_message)
+
+
+class DiscoveryFeedbackTest(unittest.TestCase):
+    def record(self, action, data):
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            agent = RecordedAgent(None, None, trace_dir=Path(directory), recorder=events.append, redactor=Redactor())
+            agent._record({"type": "observation", "step": 1, "action": action,
+                           "result": {"ok": True, "data": data}})
+            trace = json.loads(agent.trace_path.read_text(encoding="utf-8"))
+        return events[0]["feedback"], trace
+
+    def test_incomplete_search_preserves_coverage_counts_and_trace(self):
+        data = {"path": "src", "scope": "supported_text_files", "matches": [], "truncated": True,
+                "scan_complete": False, "stop_reason": "file_limit", "scanned_files": 1500,
+                "matched_lines_total": 4, "skipped_counts": {"too_large": 1, "read_errors": 0},
+                "has_more": True, "next_cursor": "private_page_token"}
+        feedback, trace = self.record("search_code", data)
+        self.assertEqual("partial", feedback["status"])
+        self.assertEqual("src", feedback["scopePath"])
+        self.assertFalse(feedback["scanComplete"])
+        self.assertEqual("file_limit", feedback["stopReason"])
+        self.assertEqual((0, 1500, 4), (feedback["returned"], feedback["scannedFiles"], feedback["matchedLinesTotal"]))
+        self.assertEqual(data["skipped_counts"], feedback["skippedCounts"])
+        self.assertTrue(feedback["hasMore"])
+        self.assertNotIn("private_page_token", json.dumps(feedback))
+        self.assertEqual(data, trace["result"]["data"])
+
+    def test_complete_listing_and_legacy_feedback_do_not_invent_evidence(self):
+        feedback, _ = self.record("list_files", {"subdir": "src", "files": ["src/a.py"], "returned": 1,
+                                                 "complete": True, "has_more": False, "stop_reason": "exhausted"})
+        self.assertEqual("ok", feedback["status"])
+        self.assertEqual("src", feedback["scopePath"])
+        self.assertTrue(feedback["complete"])
+        self.assertFalse(feedback["hasMore"])
+        legacy, _ = self.record("search_code", {"matches": [], "truncated": False})
+        self.assertNotIn("scanComplete", legacy)
+        self.assertNotIn("matchedLinesTotal", legacy)
+        self.assertNotIn("未找到", legacy["message"])
