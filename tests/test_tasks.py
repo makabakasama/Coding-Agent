@@ -23,8 +23,8 @@ def request_contract(**changes):
 
 
 @contextmanager
-def serving(service, frontend=None):
-    server = create_server(service, port=0, frontend=frontend)
+def serving(service, frontend=None, *, auth=None, access=None):
+    server = create_server(service, port=0, frontend=frontend, auth=auth, access=access)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:

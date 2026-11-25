@@ -2,6 +2,10 @@
 .table-scroll{overflow-x:auto}.task-records{min-width:720px}.task-summary{max-width:300px;white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:6px}.task-records small{overflow-wrap:anywhere}.task-records td{vertical-align:top}
 @media(max-width:650px){nav{flex-wrap:wrap}}
 [hidden]{display:none!important}
+
+.account-card {
+  max-width: 420px;
+}
 .path-choice{display:flex;gap:8px;align-items:center}.path-choice input{flex:1;min-width:0}.path-choice button{white-space:nowrap;margin-top:6px}.picker-entries{max-height:330px;overflow:auto;border:1px solid #e0e6ea;border-radius:6px;margin:14px 0}.picker-entry{display:block;width:100%;text-align:left;background:white;color:#243443;border-bottom:1px solid #edf0f2;border-radius:0;padding:9px 12px}.picker-entry:hover,.picker-entry:focus{background:#eaf2ee}
 .picker-row{display:flex;align-items:center;border-bottom:1px solid #edf0f2}.picker-row .picker-entry{flex:1;min-width:0;border:0}.picker-select{flex:none;margin:0 8px;padding:6px 10px}
 

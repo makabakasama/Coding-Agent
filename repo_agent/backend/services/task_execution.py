@@ -67,7 +67,7 @@ class RecordedAgent(Agent):
         super().__init__(*args, **kwargs)
 
     def _record(self, item):
-        clean = json.loads(self.redactor.private(json.dumps(item, ensure_ascii=False)))
+        clean = self.redactor.private_value(item)
         super()._record(clean)
         event = {"type": item["type"]}
         for key in ("step", "action", "attempt", "outcome"):
@@ -669,7 +669,7 @@ class TaskExecution:
                 incomplete.append('部分完成步骤引用了旧编辑版本的通过检查，仍需核实')
             if agent_result.get('outcome') in ('blocked', 'incomplete'):
                 incomplete.append('Agent 声明任务受阻或未完成，详见交付状态及依据')
-            write_json(directory / "agent-result.json", json.loads(redactor.private(json.dumps(agent_result, ensure_ascii=False))))
+            write_json(directory / "agent-result.json", redactor.private_value(agent_result))
             stop = {"agent_reported_finished": "agent_reported_finished", "step_limit": "step_limit"}.get(agent_result["status"], "agent_error")
             save_state(status="finalizing", phase="final_checks", activity="fixed_checks")
             event({"type": "phase", "phase": "final_checks"})
@@ -726,7 +726,7 @@ class TaskExecution:
             if agent_result['status'] == 'error':
                 agent_result.update(steps=state['steps'], reason='Agent 执行中断，详见执行诊断')
             record_error("execute_or_check", exc)
-            stop = "execution_error"
+            stop = exc.code if isinstance(exc, TaskError) and exc.code == "REVIEW_BASE_CHANGED" else "execution_error"
             incomplete.append("执行异常，保留已产生材料；结果不代表修复通过")
             try:
                 write_json(directory / "failure.json", {"errorType": type(exc).__name__, "at": now()})

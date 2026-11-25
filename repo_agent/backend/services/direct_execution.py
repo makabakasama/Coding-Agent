@@ -119,6 +119,12 @@ class DirectExecution(TaskExecution):
                 snapshot[relative] = hashlib.sha256(raw).hexdigest()
                 contents[relative] = raw
         if not hasattr(self, 'initial_contents'):
+            info = self.store.round_info(self.direct_task['taskId']) if hasattr(self.store, 'round_info') else None
+            base = (info or {}).get('reviewBase')
+            if base:
+                from repo_agent.backend.services.review_delivery import snapshot_digest
+                if snapshot_digest(snapshot) != base['snapshotSha256']:
+                    raise TaskError(409, 'REVIEW_BASE_CHANGED', '当前文件与所选交付不一致，请重新审查')
             self.initial_contents = contents
             from repo_agent.backend.services.task_execution_tools import TaskRepoTools
             tools = TaskRepoTools(workspace, contract=self.direct_task['contract'],excluded_roots=self._runtime_paths(workspace))

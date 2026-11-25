@@ -11,14 +11,29 @@ import re
 
 from repo_agent.backend.schemas.task_contract import TaskError, load_json
 from repo_agent.backend.services.task_service import TaskService
+from repo_agent.backend.routers.auth_http import AUTH_METHODS, authenticate_request, dispatch_auth, require_admin
 from repo_agent.backend.repositories.task_history import REGISTRY
+
+
+STATIC_ASSETS = {
+    '/': ('index.html', 'text/html'),
+    '/index.html': ('index.html', 'text/html'),
+    '/app.js': ('app.js', 'text/javascript'),
+    '/chat.js': ('chat.js', 'text/javascript'),
+    '/auth.js': ('auth.js', 'text/javascript'),
+    '/project-access.js': ('project-access.js', 'text/javascript'),
+    '/styles.css': ('styles.css', 'text/css'),
+}
 
 
 class TaskHandler(BaseHTTPRequestHandler):
     server_version = "CodingAgentTasks/0.3"
 
-    def __init__(self, *args, service, frontend, **kwargs):
+    def __init__(self, *args, service, frontend, auth=None, access=None, **kwargs):
         self.service, self.frontend = service, frontend.resolve()
+        self.auth = auth
+        self.access = access
+        self.identity = None
         super().__init__(*args, **kwargs)
 
     def setup(self):
@@ -81,7 +96,24 @@ class TaskHandler(BaseHTTPRequestHandler):
     def _dispatch(self):
         self._local_request()
         path = urlsplit(self.path).path
-        if path == '/api/conversations' or path.startswith('/api/conversations/'):
+        if path in AUTH_METHODS:
+            dispatch_auth(self, path)
+            return
+        is_chat = path == '/api/conversations' or path.startswith('/api/conversations/')
+        if path not in STATIC_ASSETS:
+            if self.access is None:
+                require_admin(self)
+                audit = getattr(self.service, 'audit', None)
+                if audit is not None and audit.account_mode():
+                    raise TaskError(503, 'ACCOUNT_MODE_REQUIRED', '该工作台已启用账号模式')
+            else:
+                from repo_agent.backend.routers.project_http import dispatch_projects, guard_business
+                self.identity = authenticate_request(self)
+                if dispatch_projects(self, path):
+                    return
+                if not is_chat:
+                    guard_business(self, path)
+        if is_chat:
             from repo_agent.backend.routers.chat_http import dispatch_chat
             dispatch_chat(self, path)
             return
@@ -128,8 +160,12 @@ class TaskHandler(BaseHTTPRequestHandler):
         if lifecycle:
             if self.command not in ('GET', 'POST'):
                 raise TaskError(405, 'METHOD_NOT_ALLOWED', '本轮删除状态接口支持 GET 和 POST')
-            value = (self.service.lifecycle.get(lifecycle[1]) if self.command == 'GET'
-                     else self.service.lifecycle.change(lifecycle[1], self._body()))
+            if self.command == 'GET':
+                value = self.service.lifecycle.get(lifecycle[1])
+            elif self.access is not None:
+                value = self.service.lifecycle.change(lifecycle[1], self._body(), actor=self.identity)
+            else:
+                value = self.service.lifecycle.change(lifecycle[1], self._body())
             self._json(200, value)
             return
         if path == '/api/trash':
@@ -143,11 +179,35 @@ class TaskHandler(BaseHTTPRequestHandler):
                 raise TaskError(405, "METHOD_NOT_ALLOWED", "准备诊断仅支持读取")
             self._json(200, self.service.preparation.diagnostics(diagnostics[1]))
             return
+        review = re.fullmatch(r"/api/tasks/([0-9a-f]{32})/review", path)
+        if review:
+            if self.command == 'GET':
+                self.service.get(review[1])
+                self._json(200, self.service.user_review(review[1]))
+                return
+            if self.command != 'POST':
+                raise TaskError(405, 'METHOD_NOT_ALLOWED', '审查仅支持读取或提交')
+            value = self._body()
+            if not isinstance(value, dict):
+                raise TaskError(400, 'VALIDATION_ERROR', '审查决定需要 JSON 对象')
+            self._json(200, self.service.user_review(review[1], value, actor=self.identity)
+                       if self.access is not None else self.service.user_review(review[1], value))
+            return
         organization = re.fullmatch(r"/api/tasks/([^/]+)/organization", path)
         if organization:
             if self.command != "GET":
                 raise TaskError(405, "METHOD_NOT_ALLOWED", "关联信息仅支持读取")
             self._json(200, self.service.organization(organization[1]))
+            return
+        discussion = re.fullmatch(r"/api/projects/([^/]+)/tasks/([^/]+)/discussion", path)
+        if discussion:
+            if self.command != "POST":
+                raise TaskError(405, 'METHOD_NOT_ALLOWED', '打开需求讨论需要 POST')
+            if self._body() != {}:
+                raise TaskError(400, 'VALIDATION_ERROR', '打开需求讨论仅接受空对象')
+            if self.service.chat is None:
+                raise TaskError(503, 'CHAT_UNAVAILABLE', '会话服务需要 PostgreSQL')
+            self._json(200, self.service.chat.requirement_discussion(*discussion.groups()))
             return
         experiment_run = re.fullmatch(
             r"/api/projects/([^/]+)/tasks/([^/]+)/runs(?:/(status))?", path
@@ -170,20 +230,34 @@ class TaskHandler(BaseHTTPRequestHandler):
         history = re.fullmatch(r"/api/projects/([^/]+)/tasks(?:/([^/]+)(?:/rounds(?:/([^/]+)(?:/(verifications|artifacts/([^/]+)))?)?)?)?", path)
         if history:
             project, task, identifier, part, artifact_id = history.groups()
-            if project not in REGISTRY:
+            registration = REGISTRY.get(project)
+            configured = registration and any(p['projectId'] == project for p in self.service.projects.list())
+            ordinary = not registration or (configured and task != registration[0])
+            if ordinary:
                 if urlsplit(self.path).query:
                     raise TaskError(400, "INVALID_CURSOR", "普通需求接口不接受查询参数")
-                if self.command == "POST" and task is not None and path.endswith("/rounds"):
+                if self.command == "POST" and task is None:
+                    self._json(200, self.service.draft_requirement(project, self._body()))
+                elif self.command == "POST" and task is not None and path.endswith("/rounds"):
                     self._json(201, self.service.new_round(project, task, self._body()))
                 elif self.command != "GET":
                     raise TaskError(405, "METHOD_NOT_ALLOWED", "普通需求接口方法不支持")
                 elif task is None:
-                    self._json(200, self.service.ordinary_tasks(project))
+                    body = self.service.ordinary_tasks(project)
+                    if self.access is not None and body.get('canDiscuss'):
+                        body['canDiscuss'] = self.access.role_for(self.identity, project) in (
+                            'admin', 'developer', 'maintainer')
+                    if registration:
+                        body['tasks'] += self.service.history.tasks(project)['tasks']
+                    self._json(200, body)
                 elif identifier is None and path.endswith("/rounds"):
-                    self.service.ordinary_task(project, task)
-                    self._json(200, {"rounds": self.service.store.rounds(project, task)})
+                    self._json(200, {"rounds": self.service.ordinary_rounds(project, task)})
                 elif identifier is None:
-                    self._json(200, self.service.ordinary_task(project, task))
+                    body = self.service.ordinary_task(project, task)
+                    if self.access is not None:
+                        body = {**body, 'canDevelop': self.access.role_for(self.identity, project) in (
+                            'admin', 'developer', 'maintainer')}
+                    self._json(200, body)
                 else:
                     raise TaskError(404, "TASK_NOT_FOUND", "请通过轮次的运行编号访问结果")
                 return
@@ -226,7 +300,16 @@ class TaskHandler(BaseHTTPRequestHandler):
             if names and not 1 <= limit <= (100 if part == "events" else 16000):
                 raise TaskError(400, "INVALID_CURSOR", "分页长度无效")
             if part is None:
-                status, body = self.service.execution.start(task_id, self._body()) if self.command == "POST" else (200, self.service.execution.get(task_id))
+                if self.command == 'POST' and self.access is not None:
+                    from repo_agent.backend.routers.project_http import send_request
+                    send_request(self, self.access.request_task(self.identity, task_id, self._body()))
+                    return
+                if self.access is not None:
+                    status, body = 200, self.access.task_state(self.identity, task_id)
+                elif self.command == "POST":
+                    status, body = self.service.execution.start(task_id, self._body())
+                else:
+                    status, body = 200, self.service.execution.get(task_id)
             elif part == "events":
                 status, body = 200, self.service.execution.events(task_id, int(query.get("after", ["0"])[0]), limit)
             elif part == "result":
@@ -256,28 +339,58 @@ class TaskHandler(BaseHTTPRequestHandler):
             if self.command not in allowed.split(", "):
                 self._json(405, TaskError(405, "METHOD_NOT_ALLOWED", "该接口不支持此方法").response(), {"Allow": allowed})
             elif preparation_id is not None:
+                if self.access is not None and self.command == 'POST':
+                    raise TaskError(409, 'PREPARATION_MANAGED', '工作副本由领取校验通过后的 Worker 准备')
                 record = (self.service.prepare(preparation_id, self._body()) if self.command == "POST"
                           else self.service.preparation.query(preparation_id))
                 self._json(200, record)
             elif path == "/api/projects":
-                self._json(200, {"projects": self.service.history.projects(self.service.projects.list())})
+                projects = self.service.projects.list()
+                if self.access is not None:
+                    from repo_agent.backend.routers.project_http import visible_projects
+                    if not self.identity.admin:
+                        roles = self.access.roles(self.identity)
+                        projects = [project for project in projects if project['projectId'] in roles]
+                    projects = visible_projects(self, self.service.history.projects(projects))
+                else:
+                    projects = self.service.history.projects(projects)
+                self._json(200, {"projects": projects})
             elif path == "/api/tasks":
                 if self.command == "GET":
-                    self._json(200, {"tasks": self.service.list()})
+                    if self.access is not None and not self.identity.admin:
+                        self._json(200, {"tasks": self.service.list(project_ids=self.access.roles(self.identity))})
+                    else:
+                        self._json(200, {"tasks": self.service.list()})
                 else:
-                    record = self.service.create(self._body())
+                    value = self._body()
+                    if self.access is not None and isinstance(value, dict) and 'conversationContext' in value:
+                        raise TaskError(400, 'VALIDATION_ERROR', '会话执行上下文由服务端生成')
+                    if self.access is not None and not self.identity.admin:
+                        from repo_agent.backend.services.project_access import admin_required
+                        if isinstance(value, dict) and value.get('targetPath'):
+                            admin_required(self.identity)
+                        project = value.get('projectId') if isinstance(value, dict) else None
+                        if not isinstance(project, str):
+                            raise TaskError(400, 'VALIDATION_ERROR', '请选择项目')
+                        self.access.require(self.identity, project, 'developer')
+                        self.access.check_source(project)
+                    record = self.service.create(value)
                     self._json(201, record, {"Location": "/api/tasks/" + record["taskId"]})
             else:
-                self._json(200, self.service.get(path[len("/api/tasks/"):]))
+                record = self.service.get(path[len("/api/tasks/"):])
+                if self.access is not None:
+                    role = self.access.role_for(self.identity, record['contract']['projectId'])
+                    if role is None:
+                        from repo_agent.backend.repositories.project_access_store import missing_project
+                        raise missing_project()
+                    record = {**record, 'projectRole': role}
+                self._json(200, record)
             return
-        assets = {"/": ("index.html", "text/html"), "/index.html": ("index.html", "text/html"),
-                  "/app.js": ("app.js", "text/javascript"), "/chat.js": ("chat.js", "text/javascript"),
-                  "/styles.css": ("styles.css", "text/css")}
-        if path in assets:
+        if path in STATIC_ASSETS:
             if self.command not in ("GET", "HEAD"):
                 self._json(405, TaskError(405, "METHOD_NOT_ALLOWED", "静态资源只支持读取").response(), {"Allow": "GET, HEAD"})
                 return
-            name, mime = assets[path]
+            name, mime = STATIC_ASSETS[path]
             asset = self.frontend / name
             if asset.resolve() != asset:
                 raise TaskError(404, "ROUTE_NOT_FOUND", "资源不存在")

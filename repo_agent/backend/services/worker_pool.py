@@ -41,6 +41,10 @@ class WorkerPool:
     def _execute(self, task_id, execution_id):
         logger.info('task=%s execution=%s started', task_id, execution_id)
         try:
+            if self.queue.needs_guarded_preparation(task_id, execution_id, self.worker_id):
+                prepared = self.execution.preparation.query(task_id, prepare=True)
+                if prepared['status'] != 'prepared':
+                    raise TaskError(409, 'TASK_PREPARATION_FAILED', '任务工作副本未准备完成')
             state = self.execution.run_claimed(task_id, execution_id)
             terminated = state is not None and state['status'] == 'terminated'
             reason = state.get('stopReason') if terminated else 'EXECUTION_UNCONFIRMED'
@@ -58,6 +62,22 @@ class WorkerPool:
         logger.info('task=%s execution=%s finished status=%s reason=%s',
                     task_id, execution_id, 'terminated' if terminated else 'unknown', reason)
 
+    def _saved_termination(self, task_id, execution_id):
+        try:
+            state = self.execution.get(task_id, check_readiness=False)
+            if state.get('status') != 'terminated' or state.get('executionId') != execution_id:
+                return None
+            result = self.execution.result(task_id)
+        except TaskError as exc:
+            if exc.status == 503:
+                raise
+            return None
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+        if result.get('executionId') == execution_id and isinstance(result.get('stopReason'), str):
+            return result['stopReason']
+        return None
+
     def run(self, stop_event=None):
         stop_event = stop_event or threading.Event()
         self.queue.store.root.mkdir(parents=True, exist_ok=True)
@@ -65,7 +85,7 @@ class WorkerPool:
             with exclusive(self.queue.store.root / 'execution-global.lock') as acquired:
                 if not acquired or self.execution._owner():
                     raise TaskError(409, 'EXECUTION_UNRESOLVED', '现有执行仍在运行或待核实，Worker 池未启动')
-                self.queue.abandon_claims()
+                self.queue.abandon_claims(recover=self._saved_termination)
                 if self.chat is not None:
                     self.chat.recover()
                 logger.info('worker=%s ready slots=%s', self.worker_id, self.workers)

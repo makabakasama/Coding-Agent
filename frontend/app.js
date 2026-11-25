@@ -1,3 +1,6 @@
+import {apiFetch as fetch, canAdministerInstance, initializeAuth, projectMode, renderAuth} from './auth.js';
+import {executionAuditHref, mountExecutionAudit, mountProjectAccess, projectAccessHref} from './project-access.js';
+
 const app = document.querySelector('#app');
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const demo = {
@@ -48,6 +51,7 @@ function task() {
  const epoch=pageEpoch, active=()=>pageEpoch===epoch;
  app.innerHTML=heading('NEW TASK','创建任务','选择本机目标，描述你希望完成的事情。')+`<form id="simple-task"><section class="card"><label>目标文件或目录<div class="path-choice"><input name="targetPath" placeholder="点击浏览选择文件或目录"><button type="button" class="secondary" id="browse-target">浏览…</button></div><span class="hint">从工作目录浏览选择，也可填写其他本机路径。</span></label><label>或选择已有项目<select name="projectId"><option value="">可选，选择文件或目录即可</option></select></label><label>任务描述<textarea name="instruction" required maxlength="4000" placeholder="例如：给新建任务表单增加可编辑的最大执行步数，默认 50。"></textarea></label><label>任务方式<select name="kind"><option value="add_feature">修改代码</option><option value="read_code">只读分析</option><option value="fix_bug">修复问题</option></select></label><details><summary>高级设置（可选）</summary><label>执行方式<select name="workspaceMode"><option value="direct">直接修改当前文件</option><option value="worktree">Git 隔离副本</option></select></label><label>步数上限<input name="maxSteps" type="number" min="1" max="50" step="1" value="50"></label><label>Git 版本<input name="revision" placeholder="默认 HEAD；普通文件使用当前内容"></label><label>额外验收说明<textarea name="expected" maxlength="4000" placeholder="可选，默认按任务描述完成并报告结果"></textarea></label><label>修改范围<textarea name="allowedPaths" placeholder="可选，每行一个相对路径；默认仅所选文件或目录"></textarea></label><label class="check"><input name="allowTests" type="checkbox">允许运行指定检查</label><label class="check"><input name="allowTemporaryChecks" type="checkbox">允许在本机运行 Agent 编写的临时 Python 自测</label><label>检查目标<textarea name="checkTargets" placeholder="可选，仅在允许运行检查时填写 pytest 目标"></textarea></label><p><a href="#advanced-task">打开完整契约表单</a></p></details><p id="simple-error" role="alert"></p><button id="preview-simple">预览并保存</button></section></form><dialog id="simple-review"><h2>确认任务</h2><pre id="simple-review-content"></pre><p>保存后可在任务详情提交执行。直接模式会修改所选目标。</p><p id="simple-review-error" role="alert"></p><button id="save-simple">确认保存</button><button id="cancel-simple" class="secondary">返回修改</button></dialog><dialog id="target-picker" aria-label="选择目标文件或目录"><h2>选择目标文件或目录</h2><p id="picker-path" class="hint"></p><div class="actions"><button type="button" class="secondary" id="picker-up">上一级</button><button type="button" id="picker-directory">选择当前目录</button></div><p id="picker-error" role="alert"></p><div id="picker-entries" class="picker-entries"></div><p class="hint" id="picker-note"></p><button type="button" class="secondary" id="picker-cancel">取消</button></dialog>`;
  const form=document.querySelector('#simple-task'),dialog=document.querySelector('#simple-review');
+ if(!canAdministerInstance())form.elements.targetPath.closest('label').hidden=true;
  const save=document.querySelector('#save-simple'),preview=document.querySelector('#preview-simple');
  let payload=null;
  const picker=document.querySelector('#target-picker');
@@ -121,8 +125,10 @@ function task() {
  fetch('/api/projects',{cache:'no-store'}).then(async response=>{
   if(!response.ok)throw Error('项目列表不可用');const data=await response.json();if(!active())return;
   if(!Array.isArray(data.projects))throw Error('项目列表格式异常');
-  form.elements.projectId.innerHTML='<option value="">可选，选择文件或目录即可</option>'+data.projects.filter(p=>p.canCreateTask!==false).map(p=>`<option value="${escape(p.projectId)}">${escape(p.name)}</option>`).join('');
- }).catch(()=>{if(active())document.querySelector('#simple-error').textContent='已有项目暂无法加载，仍可填写本机路径创建。';});
+  const placeholder=canAdministerInstance()?'可选，选择文件或目录即可':'请选择项目';
+  form.elements.projectId.innerHTML=`<option value="">${placeholder}</option>`+data.projects.filter(p=>p.canCreateTask!==false).map(p=>`<option value="${escape(p.projectId)}">${escape(p.name)}</option>`).join('');
+ }).catch(()=>{if(active())document.querySelector('#simple-error').textContent=canAdministerInstance()
+  ?'已有项目暂无法加载，仍可填写本机路径创建。':'已有项目暂无法加载。';});
 }
 
 function advancedTask() {
@@ -169,7 +175,7 @@ let preparationPending = new Set();
 function preparationPanel(taskRecord, {onPrepared=()=>{}}={}) {
  const id=taskRecord.taskId, epoch=pageEpoch, card=document.querySelector('#preparation-card');
  if(taskRecord.contract.workspaceMode==='direct'){
-  card.innerHTML='<h2>直接修改当前仓库</h2><p>无需创建或准备工作副本。仓库校验通过后，可直接提交执行队列。执行前会自动保存本轮基线，修改直接写入当前项目目录。</p>';
+  card.innerHTML='<h2>直接修改当前仓库</h2><p>无需创建或准备工作副本。执行前会保存本轮基线，修改直接写入当前项目目录。</p>';
   return;
  }
  let request=0;
@@ -189,9 +195,11 @@ function preparationPanel(taskRecord, {onPrepared=()=>{}}={}) {
  function draw(r, message=''){
   const status=r?.status, labels={not_prepared:'尚未准备',preparing:'工作副本准备中',prepared:taskRecord.contract.workspaceMode==='direct'?'当前仓库已就绪':'工作副本已准备',preparation_failed:'工作副本准备失败'};
   card.innerHTML=`<h2>${labels[status]||'准备状态暂无法确认'}</h2><p role="status" style="white-space:pre-wrap">${escape(message || ({not_prepared:'从已冻结 commit 单独准备副本；不包含源仓库未提交内容。',preparing:'后端报告正在准备工作副本；不是 Agent 执行中。请查询最新状态。',prepared:'副本准备记录已就绪；Agent 与检查状态见执行区域。',preparation_failed:'失败材料保留；本轮没有重试或清理接口。需要新一轮时请新建任务。'}[status]) || '请先查询最新状态，勿直接重复准备。')}</p>${r?`<dl class="kv"><dt>准备编号</dt><dd>${escape(r.preparationId||'未提供')}</dd><dt>副本标识</dt><dd>${escape(r.workspaceId||'未提供')}</dd><dt>固定 commit</dt><dd>${escape(r.baseCommit||taskRecord.contract.baseCommit)}</dd><dt>入队时间</dt><dd>${escape(displayTime(r.queuedAt))}</dd><dt>调度说明</dt><dd>${escape(({WORKER_INTERRUPTED:'Worker 已中断，保留修改和日志待核实',WORKER_HEARTBEAT_LOST:'Worker 心跳中断，执行状态待核实',EXECUTION_UNCONFIRMED:'执行结果待核实',ALREADY_STARTED:'已有执行材料，未重复执行'}[r.stopReason])||r.stopReason||'未提供')}</dd><dt>开始时间</dt><dd>${escape(date(r.startedAt))}</dd><dt>结束时间</dt><dd>${escape(date(r.finishedAt))}</dd></dl>`:''}${r?.error?`<p role="alert">${escape(r.error.message)}（${escape(r.error.code)}）</p>`:''}<p class="hint">${taskRecord.contract.workspaceMode==='direct'?'本轮直接修改当前仓库文件；现有未提交内容参与执行前基线。':'worktree 仅隔离文件，不是执行沙箱。'}准备阶段不安装依赖或执行测试；实际检查见执行区域。准备接口不提供本机路径或日志下载入口。</p><div class="actions"><button id="prepare-workspace" ${status!=='not_prepared'||preparationPending.has(id)?'disabled':''}>${preparationPending.has(id)?'正在等待准备响应…':'准备工作副本'}</button><button class="secondary" id="query-preparation" ${preparationPending.has(id)?'disabled':''}>查询最新状态</button></div>`;
-  document.querySelector('#prepare-workspace').onclick=()=>{if(status==='not_prepared'&&!preparationPending.has(id))update(true);};
+  const prepare=document.querySelector('#prepare-workspace');
+  prepare.hidden=projectMode();
+  prepare.onclick=()=>{if(!projectMode()&&status==='not_prepared'&&!preparationPending.has(id))update(true);};
   document.querySelector('#query-preparation').onclick=()=>update(false);
-  if(status==='preparation_failed'){
+  if(status==='preparation_failed'&&canAdministerInstance()){
    card.insertAdjacentHTML('beforeend','<details><summary>查看失败详情</summary><p id="preparation-diagnostics">正在读取已保存的诊断记录…</p></details>');
    const host=document.querySelector('#preparation-diagnostics');
    fetch(`/api/tasks/${id}/preparation/diagnostics`,{cache:'no-store'}).then(async response=>{const data=await response.json();if(!active()||!host)return;if(!response.ok)throw new Error(errorText(data));host.textContent=data.available?JSON.stringify(data.details,null,2):'本轮未保存详细诊断，无法从现有记录确定原因。';host.style.whiteSpace='pre-wrap';}).catch(e=>{if(active()&&host)host.textContent='诊断暂无法读取：'+e.message;});
@@ -286,10 +294,16 @@ function executionPanel(taskRecord) {
  const root=document.querySelector('#execution-card');
  root.innerHTML=`<h2>Agent 执行</h2><div id="execution-status" aria-live="polite"></div><div class="actions"><button id="start-agent" disabled>提交执行队列</button><button class="secondary" id="query-execution">查询执行状态</button></div><div id="recent-feedback"><h3>最近实际反馈</h3><p class="hint">尚未读取到实际反馈摘要。</p></div><div id="execution-events"><h3>逐步记录</h3><p id="event-message" role="status"></p><div id="event-list"></div><button class="secondary" id="more-events" disabled>读取后续事件</button></div><div id="execution-result"><h3>结果与证据</h3><p id="result-message" role="status">尚未查询到完整结果，不据此推断执行成功或失败。</p><div id="result-content"></div><button class="secondary" id="query-result" disabled>查询结果</button></div><dialog id="start-review" aria-label="启动 Agent 确认"><h2>核对并单独启动</h2><div id="start-contract"></div><div class="notice">此操作会持久入队，由独立 Worker 执行 Agent。允许测试时会执行仓库代码，可能有副作用或网络访问；worktree 不是沙箱。模型结束不等于检查通过。</div><div class="actions"><button id="confirm-start">确认启动</button><button class="secondary" id="cancel-start">返回</button></div></dialog>`;
  const $=selector=>document.querySelector(selector);
+ if(projectMode()){
+  $('#start-agent').textContent='提交执行申请';
+  $('#confirm-start').textContent='确认提交';
+  $('#start-review h2').textContent='核对执行申请';
+  $('#start-review .notice').textContent='实例管理员放行后才会入队。放行前会复核申请人权限及此处列出的执行范围。';
+ }
  let state=null, timer=null, closed=false, querying=false, refreshRequested=false, cursor=0, eventBusy=false, resultBusy=false, resultLoaded=false, artifacts=new Map();
  const active=()=>!closed && pageEpoch===epoch;
  let undoState=null, undoBusy=false;
- if(taskRecord.contract.workspaceMode==='direct'){
+ if(taskRecord.contract.workspaceMode==='direct'&&canAdministerInstance()){
   root.insertAdjacentHTML('beforeend','<section><h3>撤回本轮修改</h3><p id="undo-status" role="status">撤回前会检查后续修改。先查询可撤回状态。</p><div class="actions"><button class="secondary" id="query-undo">检查能否撤回</button><button id="undo-task" disabled>撤回本轮修改</button></div><dialog id="undo-review"><h3>确认撤回本轮修改</h3><p>恢复本轮执行前的文件，新建文件将被移除。发现后续编辑时会停止。</p><pre id="undo-files"></pre><button id="confirm-undo">确认撤回</button><button class="secondary" id="cancel-undo">取消</button></dialog></section>');
   $('#query-undo').onclick=queryUndo;
   $('#undo-task').onclick=()=>{if(undoBusy||!undoState?.canUndo||!state?.executionId)return;$('#undo-files').textContent=undoState.files.join('\n');$('#undo-review').showModal();};
@@ -350,15 +364,33 @@ function executionPanel(taskRecord) {
  };
  executionCleanup=()=>{closed=true;if(timer!==null)clearTimeout(timer);};
  const text=(sel,value)=>{$(sel).textContent=value;};
- function buttons(){const busy=executionPending.has(id);$('#start-agent').disabled=!state?.canStart||state.status!=='not_started'||busy||querying;$('#query-execution').disabled=querying||busy;$('#query-result').disabled=resultBusy||!state||['not_started','queued'].includes(state.status);}
+ const canSubmit=()=>state?.status==='not_started'&&(state.canRequest??state.canStart);
+ function buttons(){const busy=executionPending.has(id);$('#start-agent').disabled=!canSubmit()||busy||querying;$('#query-execution').disabled=querying||busy;$('#query-result').disabled=resultBusy||!state||['not_started','queued'].includes(state.status);}
  function validState(r){return r?.schemaVersion===1&&r.taskId===id&&['not_started','queued','running','finalizing','terminated','unknown'].includes(r.status)&&typeof r.canStart==='boolean'&&['configured_provider','injected_test_model'].includes(r.source)&&r.isExecutionSandbox===false&&(['not_started','queued'].includes(r.status)||r.status==='unknown'&&r.executionId===undefined||/^[a-f0-9]{32}$/.test(r.executionId||''));}
  function draw(r,message=''){
   state=r;
   const labels={not_started:'尚未启动',queued:'已入队，等待 Worker',running:'执行中',finalizing:'正在整理',terminated:'执行已终止',unknown:'状态暂无法确认'};
-  const blocks={PREPARATION_REQUIRED:'需要先准备工作副本',WORKSPACE_UNAVAILABLE:'工作副本不可用',WORKSPACE_DIRTY:'工作副本有未提交或未跟踪内容',EXECUTION_CONFIG_UNAVAILABLE:'本机执行配置不可用',EXECUTION_BUSY:'其他任务正在执行',EXECUTION_UNRESOLVED:'存在未核实的旧执行，需维护者处理',ALREADY_STARTED:'本任务已有执行记录'};
+  const blocks={PREPARATION_REQUIRED:projectMode()?'Worker 领取并通过授权复核后准备副本':'需要先准备工作副本',WORKSPACE_UNAVAILABLE:'工作副本不可用',WORKSPACE_DIRTY:'工作副本有未提交或未跟踪内容',EXECUTION_CONFIG_UNAVAILABLE:'本机执行配置不可用',EXECUTION_BUSY:'其他任务正在执行',EXECUTION_UNRESOLVED:'存在未核实的旧执行，需维护者处理',ALREADY_STARTED:'本任务已有执行记录'};
   const phases={queue:'等待调度',agent:'Agent 决策与工具',final_checks:'固定最终检查',delivery:'整理交付'};
   $('#execution-status').innerHTML=`<p><strong>${labels[r?.status]||'状态暂无法确认'}</strong>　<span class="badge">${escape(sourceLabel(r?.source))}</span></p>${message?`<p role="alert" style="white-space:pre-wrap">${escape(message)}</p>`:''}${r?`<dl class="kv"><dt>执行编号</dt><dd>${escape(r.executionId||'未提供')}</dd><dt>阶段</dt><dd>${escape(phases[r.phase]||r.phase||'未提供')}</dd><dt>当前活动</dt><dd>${escape(r.activity||'未提供')}</dd><dt>决策步数</dt><dd>${Number.isInteger(r.steps)?r.steps:'未提供'} / ${Number.isInteger(r.maxSteps)?r.maxSteps:taskRecord.contract.maxSteps}</dd><dt>入队时间</dt><dd>${escape(displayTime(r.queuedAt))}</dd><dt>调度说明</dt><dd>${escape(({WORKER_INTERRUPTED:'Worker 已中断，保留修改和日志待核实',WORKER_HEARTBEAT_LOST:'Worker 心跳中断，执行状态待核实',EXECUTION_UNCONFIRMED:'执行结果待核实',ALREADY_STARTED:'已有执行材料，未重复执行'}[r.stopReason])||r.stopReason||'未提供')}</dd><dt>开始时间</dt><dd>${escape(displayTime(r.startedAt))}</dd><dt>最近记录时间</dt><dd>${escape(displayTime(r.updatedAt))}</dd><dt>结束时间</dt><dd>${escape(displayTime(r.finishedAt))}</dd><dt>存活状态</dt><dd>${escape(r.liveness==='confirmed'?'后端已确认':r.liveness==='stopped'?'后端记录已停止':'暂无法确认')}</dd></dl>${r.startBlockReason?`<p class="hint">启动限制：${escape(blocks[r.startBlockReason]||r.startBlockReason)}</p>`:''}`:''}<p class="hint">记录更新时间不是心跳；不根据停更推断完成或死亡。普通任务执行不属于独立 G/R/P 实验验收。</p>`;
   if(r)$('#execution-status').insertAdjacentHTML('beforeend',`<section><h3>最后保存的执行步骤</h3>${progressHTML(r.progress,r.budget)}</section>`);
+  if(r?.executionRequest){
+   const a=document.createElement('a');
+   a.href=projectAccessHref(r.executionRequest.projectId,r.executionRequest.requestId);
+   a.textContent={pending:'待管理员放行',approved:'申请已放行',rejected:'申请已拒绝'}[r.executionRequest.status];
+   $('#execution-status').prepend(a);
+  }
+  if(projectMode()&&r?.executionId){
+   const a=document.createElement('a');
+   a.href=executionAuditHref(taskRecord.contract.projectId,r.executionId);
+   a.textContent='查看授权与执行审计';
+   $('#execution-status').append(a);
+   if(r.authorizationDenied){
+    const stop=document.createElement('p');
+    stop.textContent='领取时授权复核未通过，本轮未启动。';
+    $('#execution-status').prepend(stop);
+   }
+  }
   buttons();
  }
  async function readEvents(){
@@ -407,6 +439,27 @@ function executionPanel(taskRecord) {
    $('#result-content').insertAdjacentHTML('afterbegin',`<section><h3>需求完成状态</h3><p><strong>${escape(acceptanceLabels[r.acceptance_status]||'历史记录未提供验收状态')}</strong></p><p>${escape(completionLabels[r.completion?.status]||'历史记录未提供模型结果')} · ${escape(r.execution_status||r.agent?.status||'未记录执行状态')}</p>${gaps.length?`<h4>待验证</h4><ul>${gaps.map(gap=>`<li>${escape(gap.scenario)}。${escape(gap.verification_goal)}</li>`).join('')}</ul>`:''}<p style="white-space:pre-wrap">${escape(r.completion?.evidence||'未提供依据')}</p></section>`);
    if(taskRecord.contract.workspaceMode==='direct')$('#result-content').insertAdjacentHTML('afterbegin','<p class="notice">本轮直接修改当前项目目录，文件变更已保存在原项目中。下方 Diff 展示本轮相对执行前的修改。网页源码变化需刷新页面，后端源码变化需重启对应服务加载。</p>');
    if(r.delivery?.status==='partial')$('#result-content').insertAdjacentHTML('afterbegin','<p class="notice">部分交付：常规结果保存失败，当前显示终止凭据中的已保存内容。材料可能缺失，请查看执行错误详情。</p>');
+   const reviewHost = document.createElement('section');
+   reviewHost.innerHTML = '<h3>人工审查</h3><button data-decision="accepted">接收本版</button> <button class="secondary" data-decision="changes_requested">要求修改</button><p role="status"></p>';
+   $('#result-content').append(reviewHost);
+   const reviewButtons = [...reviewHost.querySelectorAll('button')];
+   if(taskRecord.projectRole&&!['admin','maintainer'].includes(taskRecord.projectRole))
+    reviewButtons.forEach(button => {button.hidden=true;});
+   const reviewMessage = reviewHost.querySelector('p');
+   async function showReview(decision) {
+    reviewButtons.forEach(button => {button.disabled = true;});
+    try {
+     const options = decision ? {method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({executionId:r.executionId,decision})} : {cache:'no-store'};
+     const response = await fetch(`/api/tasks/${id}/review`,options);
+     const review = await response.json();
+     if (!response.ok) throw new Error(errorText(review));
+     reviewMessage.textContent = review ? projectProgress({userReview:review}) : '尚待用户审查';
+    } catch(error) {reviewMessage.textContent=error.message;}
+    finally {reviewButtons.forEach(button => {button.disabled = false;});}
+   }
+   reviewButtons.forEach(button => {button.onclick=()=>showReview(button.dataset.decision);});
+   showReview();
    for(const [artifactId,a] of artifacts)$(`#artifact-load-${a.index}`).onclick=()=>readArtifact(artifactId);
    text('#result-message',`${sourceLabel(r.source)} · 已读取实际结果。`);resultLoaded=true;
   }catch(e){if(active()){text('#result-message',`结果暂不可用：${e.message}。不推断任务成功或失败。${resultLoaded?'下方保留上次读取的结果，尚未重新确认。':''}`);}}
@@ -417,18 +470,19 @@ function executionPanel(taskRecord) {
   if(querying){refreshRequested=true;return;}
   querying=true;if(timer!==null)clearTimeout(timer);buttons();
   try{const response=await fetch(base,{cache:'no-store'});const r=await response.json();if(!active())return;if(!response.ok)throw new Error(errorText(r));if(!validState(r))throw new Error('执行状态响应格式异常。');draw(r);
-   if(r.status!=='not_started'){await readEvents();if(!active())return;if(r.resultAvailable===true&&!resultLoaded)await readResult();else if(!r.resultAvailable&&!resultLoaded)text('#result-message',r.status==='terminated'?'已终止，但未提供完整结果文件。':'尚未提供完整结果；不能根据已有材料推断完成。');}
+   if(r.authorizationDenied)text('#result-message','本轮在领取时被拒绝，没有执行结果。');
+   else if(r.status!=='not_started'){await readEvents();if(!active())return;if(r.resultAvailable===true&&!resultLoaded)await readResult();else if(!r.resultAvailable&&!resultLoaded)text('#result-message',r.status==='terminated'?'已终止，但未提供完整结果文件。':'尚未提供完整结果；不能根据已有材料推断完成。');}
   }catch(e){if(active())draw(null,`执行状态暂无法确认：${e.message}。先查询，勿重复启动。`);}
-  finally{querying=false;if(active()){buttons();if(refreshRequested){refreshRequested=false;refresh();}else if(state&&(['queued','running','finalizing'].includes(state.status)||state.stopReason==='WORKER_HEARTBEAT_LOST'))timer=setTimeout(refresh,2500);}}
+  finally{querying=false;if(active()){buttons();if(refreshRequested){refreshRequested=false;refresh();}else if(state&&(['queued','running','finalizing'].includes(state.status)||state.stopReason==='WORKER_HEARTBEAT_LOST'||state.executionRequest?.status==='pending'))timer=setTimeout(refresh,2500);}}
  }
  $('#query-execution').onclick=refresh;$('#more-events').onclick=readEvents;$('#query-result').onclick=readResult;
- $('#start-agent').onclick=()=>{if(querying||!state?.canStart||state.status!=='not_started'||executionPending.has(id))return;$('#start-contract').innerHTML=`<p><strong>${escape(sourceLabel(state.source))}</strong></p><p>任务：${escape(id)}</p><p>固定 commit：${escape(taskRecord.contract.baseCommit||'当前文件（无 Git 版本）')}</p>${contract({project:taskRecord.contract.projectId,revision:taskRecord.contract.requestedRevision,current:taskRecord.contract.current,expected:taskRecord.contract.expected,scope:taskRecord.contract.allowedPaths.join('\n'),allowTests:taskRecord.contract.allowTests,targets:taskRecord.contract.checkTargets.join('\n')})}`;$('#start-review').showModal();};
+ $('#start-agent').onclick=()=>{if(querying||!canSubmit()||executionPending.has(id))return;$('#start-contract').innerHTML=`<p><strong>${escape(sourceLabel(state.source))}</strong></p><p>任务：${escape(id)}</p><p>固定 commit：${escape(taskRecord.contract.baseCommit||'当前文件（无 Git 版本）')}</p>${contract({project:taskRecord.contract.projectId,revision:taskRecord.contract.requestedRevision,current:taskRecord.contract.current,expected:taskRecord.contract.expected,scope:taskRecord.contract.allowedPaths.join('\n'),allowTests:taskRecord.contract.allowTests,targets:taskRecord.contract.checkTargets.join('\n')})}`;$('#start-review').showModal();};
  $('#cancel-start').onclick=()=>$('#start-review').close();
  $('#confirm-start').onclick=async()=>{
-  if(!active()||querying||!state?.canStart||state.status!=='not_started'||executionPending.has(id))return;
+  if(!active()||querying||!canSubmit()||executionPending.has(id))return;
   executionPending.add(id);$('#start-review').close();if(timer!==null)clearTimeout(timer);draw(null,'已发送启动请求，正在等待响应。请勿重复启动。');
-  try{const response=await fetch(base,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const r=await response.json();executionPending.delete(id);if(!active())return;if(!response.ok){draw(null,errorText(r)+'\n请查询权威状态后再操作，不自动重发。');return;}if(![200,202].includes(response.status)||!validState(r))throw new Error('启动响应无法确认');draw(r);await refresh();}
-  catch{executionPending.delete(id);if(active())draw(null,'启动结果暂无法确认，后台可能已开始执行。请先查询状态，勿直接重复启动。');}
+  try{const response=await fetch(base,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const r=await response.json();executionPending.delete(id);if(!active())return;if(!response.ok){draw(null,errorText(r)+'\n请查询权威状态后再操作，不自动重发。');return;}if(projectMode()&&response.status===202&&r.executionRequest?.targetId===id){await refresh();return;}if(![200,202].includes(response.status)||!validState(r))throw new Error('启动响应无法确认');draw(r);await refresh();}
+  catch{executionPending.delete(id);if(active())draw(null,projectMode()?'提交结果暂无法确认。请先查询状态，勿直接重复提交。':'启动结果暂无法确认，后台可能已开始执行。请先查询状态，勿直接重复启动。');}
  };
  draw(null,'正在查询执行状态…');refresh();
  return refresh;
@@ -578,6 +632,19 @@ function verificationVerdict(v){return v.sourceFormat==='verification_v1'&&v.raw
 const historyValue = value => value===null||value===undefined||value===''?'未记录':typeof value==='object'?JSON.stringify(value):String(value);
 function historyFields(pairs){return `<dl class="kv">${pairs.map(([label,value])=>`<dt>${escape(label)}</dt><dd>${escape(historyValue(value))}</dd>`).join('')}</dl>`;}
 const historyHref = parts => '#projects/'+parts.map(encodeURIComponent).join('/');
+async function openRequirementDiscussion(taskPath) {
+    const response = await fetch(taskPath+'/discussion', {method:'POST',
+     headers:{'Content-Type':'application/json'}, body:'{}'});
+    const record = await response.json();
+    if (!response.ok) throw new Error(errorText(record));
+    return record.conversationId;
+}
+function projectProgress(task) {
+ if (task.origin === 'discussion' && task.roundCount === 0) return '需求讨论中';
+ if (task.userReview) return task.userReview.decision === 'accepted' ? '用户已接收' : '用户要求修改';
+ return ({queued:'排队中',running:'执行中',unknown:'执行待核实',terminated:'已终止 · 待审查'})[task.dispatchStatus]
+   || (task.mode === 'ordinary' ? '暂无调度记录' : '见实验记录');
+}
 async function ordinaryOrganization(id){
  const epoch=pageEpoch;
  try{const response=await fetch(`/api/tasks/${id}/organization`,{cache:'no-store'}),info=await response.json();
@@ -632,12 +699,12 @@ let projectHistoryRequest=0;
 async function projectHistory(parts=[]) {
  const request=++projectHistoryRequest;
  const epoch=pageEpoch, active=()=>pageEpoch===epoch&&request===projectHistoryRequest;
- const shell=(title,body)=>{app.innerHTML=heading('PROJECT HISTORY',escape(title),'按项目查看需求与运行轮次，读取记录不会自动启动任务。','<span class="badge">项目记录</span>')+`<div class="actions"><a class="button secondary" href="#projects">项目历史</a><a class="button secondary" href="#tasks">普通任务记录</a></div><div style="margin-top:20px">${body}</div>`;};
+ const shell=(title,body)=>{app.innerHTML=heading('PROJECT HISTORY',escape(title),'按项目查看需求与运行轮次，读取记录不会自动启动任务。','<span class="badge">项目记录</span>')+`<div class="actions"><a class="button secondary" href="#projects">项目历史</a><a class="button secondary" href="#tasks">普通任务记录</a>${projectMode()&&parts[0]?`<a class="button secondary" href="${escape(projectAccessHref(parts[0]))}">成员与执行审批</a>`:''}</div><div style="margin-top:20px">${body}</div>`;};
  shell('项目历史','<section class="card"><p role="status">正在读取历史记录…</p></section>');
  const get=async path=>{const response=await fetch(path,{cache:'no-store'});const data=await response.json();if(!response.ok)throw new Error(errorText(data));return data;};
  const table=(headers,rows)=>`<div class="table-scroll"><table class="history"><thead><tr>${headers.map(h=>`<th>${escape(h)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
  try{
-  if(!parts.length){const data=await get('/api/projects');if(!active())return;if(!Array.isArray(data.projects))throw new Error('项目列表格式异常');shell('项目与需求',`<section class="card"><h2>选择项目</h2>${data.projects.length?table(['项目','记录类型','入口'],data.projects.map(p=>`<tr><td>${escape(p.name)}<br><small>${escape(p.projectId)}</small></td><td>${escape(({available:'实验记录',missing:'历史根目录缺失',not_applicable:'普通需求'}[p.historyAvailability])||historyValue(p.historyAvailability))}</td><td><a href="${historyHref([p.projectId,'tasks'])}">查看需求 →</a></td></tr>`)):'<p class="empty">没有已登记项目。</p>'}</section>`);return;}
+  if(!parts.length){const data=await get('/api/projects');if(!active())return;if(!Array.isArray(data.projects))throw new Error('项目列表格式异常');shell('项目与需求',`<section class="card"><h2>选择项目</h2>${data.projects.length?table(['项目','记录类型','入口'],data.projects.map(p=>`<tr><td>${escape(p.name)}<br><small>${escape(p.projectId)}</small></td><td>${escape(({available:'实验记录',missing:'历史根目录缺失',not_applicable:'普通需求'}[p.historyAvailability])||historyValue(p.historyAvailability))}</td><td><a href="${historyHref([p.projectId,'tasks'])}">查看需求 →</a>${projectMode()?` · <a href="${escape(projectAccessHref(p.projectId))}">成员与执行审批</a>`:''}</td></tr>`)):'<p class="empty">没有已登记项目。</p>'}</section>`);return;}
   const [projectId,taskSegment,taskKey,roundSegment,roundId,verifySegment,verifyId]=parts;
   if(taskSegment!=='tasks'||(roundSegment&&roundSegment!=='rounds')||(verifySegment&&verifySegment!=='verifications')||parts.length>7)throw new Error('历史页面地址无效');
   const taskBase=`/api/projects/${encodeURIComponent(projectId)}/tasks`,taskPath=taskKey?`${taskBase}/${encodeURIComponent(taskKey)}`:taskBase;
@@ -645,7 +712,64 @@ async function projectHistory(parts=[]) {
    const data=await get(taskBase);if(!active())return;
    if(!Array.isArray(data.tasks))throw new Error('需求列表格式异常');
    const tasks=[...data.tasks].sort((a,b)=>(Date.parse(b.createdAt)||0)-(Date.parse(a.createdAt)||0)||String(b.taskKey).localeCompare(String(a.taskKey)));
-   shell(`${projectId} · 需求`, `<section class="card"><div class="actions"><button class="secondary" id="refresh-project-history">重新加载需求</button></div><p class="hint">按需求创建时间从新到旧排列。</p>${tasks.length?table(['需求','创建时间（北京时间）','模式','轮次','入口'],tasks.map(t=>`<tr><td>${escape(t.title||t.taskKey)}<br><small>${escape(t.taskKey)}</small>${t.issueId?`<br><small>#${escape(t.issueId)}</small>`:''}</td><td>${escape(displayTime(t.createdAt))}</td><td>${escape(t.mode==='experiment'?'历史实验':t.mode==='ordinary'?'普通任务':historyValue(t.mode))}</td><td>${escape(historyValue(t.roundCount))}</td><td><a href="${historyHref([projectId,'tasks',t.taskKey])}">查看需求与轮次 →</a></td></tr>`)):'<p class="empty">当前项目没有已登记需求；普通任务也可从原任务记录入口查找。</p>'}</section>`);
+   shell(`${projectId} · 需求`, `<section class="card"><div class="actions"><button class="secondary" id="refresh-project-history">重新加载需求</button></div><p class="hint">按需求创建时间从新到旧排列。</p>${tasks.length?table(['需求','创建时间（北京时间）','模式','轮次','进展','入口'],tasks.map(t=>`<tr><td>${escape(t.title||t.taskKey)}<br><small>${escape(t.taskKey)}</small>${t.issueId?`<br><small>#${escape(t.issueId)}</small>`:''}</td><td>${escape(displayTime(t.createdAt))}</td><td>${escape(t.mode==='experiment'?'历史实验':t.mode==='ordinary'?'普通任务':historyValue(t.mode))}</td><td>${escape(historyValue(t.roundCount))}</td><td>${escape(projectProgress(t))}</td><td><a href="${historyHref([projectId,'tasks',t.taskKey])}">查看需求与轮次 →</a></td></tr>`)):'<p class="empty">当前项目没有已登记需求；普通任务也可从原任务记录入口查找。</p>'}</section>`);
+   if (data.canDiscuss) {
+    const draft = document.createElement('details');
+    draft.className = 'card';
+    draft.innerHTML = '<summary>新建需求讨论</summary><form><label>标题<input name="title" maxlength="120" required></label><label>背景<textarea name="current" maxlength="4000" required></textarea></label><label>预期结果<textarea name="expected" maxlength="4000" required></textarea></label><button>保存需求并打开讨论</button><p role="status"></p></form>';
+    app.querySelector('.card').before(draft);
+    const form = draft.querySelector('form');
+    let requestId = crypto.randomUUID().replaceAll('-','');
+    let saved = null;
+    form.oninput = () => {requestId = crypto.randomUUID().replaceAll('-','');saved=null;};
+    form.onsubmit = async event => {
+     event.preventDefault();
+     const fields = [...form.querySelectorAll('input,textarea,button')];
+     if (fields[0].disabled) return;
+     const payload = {...Object.fromEntries(new FormData(form)),requestId};
+     fields.forEach(field => {field.disabled=true;});
+     try {
+      if (!saved) {
+       const res = await fetch(taskBase,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+       const item = await res.json();
+       if (!res.ok) throw new Error(errorText(item));
+       saved = item.taskKey;
+      }
+      const chatId = await openRequirementDiscussion(taskBase+'/'+encodeURIComponent(saved));
+      if (active()) location.hash = 'chat/'+chatId;
+     } catch(error) {
+      if(active()) {form.querySelector('p').textContent=error.message;fields.forEach(field=>{field.disabled=false;});}
+     }
+    };
+   }
+   const discussion = document.createElement('section');
+   discussion.className = 'card';
+   discussion.innerHTML = '<h2>项目讨论</h2><ul></ul><button class="secondary">读取项目会话</button><p role="status"></p>';
+   if (data.canDiscuss||projectMode()) app.append(discussion);
+   const more = discussion.querySelector('button');
+   let cursor = null;
+   more.onclick = async () => {
+    more.disabled = true;
+    try {
+     const query = new URLSearchParams({project:projectId,limit:'25'});
+     if (cursor) query.set('cursor',cursor);
+     const page = await get('/api/conversations?' + query);
+     if (!active()) return;
+     for (const chat of page.conversations) {
+      const link = document.createElement('a');
+      link.href = '#chat/' + encodeURIComponent(chat.conversationId);
+      link.textContent = chat.title;
+      const item = document.createElement('li');
+      item.append(link);
+      discussion.querySelector('ul').append(item);
+     }
+     cursor = page.nextCursor;
+     more.hidden = !page.hasMore;
+     more.textContent = '更多会话';
+     discussion.querySelector('p').textContent = discussion.querySelector('li') ? '' : '暂无项目会话';
+    } catch(error) {discussion.querySelector('p').textContent=error.message;}
+    finally {more.disabled=false;}
+   };
    document.querySelector('#refresh-project-history').onclick=()=>projectHistory(parts);
    return;
   }
@@ -653,7 +777,52 @@ async function projectHistory(parts=[]) {
    const [task,data]=await Promise.all([get(taskPath),get(taskPath+'/rounds')]);if(!active())return;
    if(task.mode!=='ordinary'||!Array.isArray(data.rounds))throw new Error('普通需求格式异常');
    const c=task.contract;
-    shell(task.title||taskKey,`<section class="card"><h2>普通需求</h2>${historyFields([['项目',projectId],['需求编号',taskKey],['任务类型',c.kind],['背景 / 当前行为',c.current],['期望分析 / 行为',c.expected],['原版本引用',c.requestedRevision],['允许修改',c.kind==='read_code'?'只读':c.allowedPaths.join('、')]])}<p>Git 任务每轮重新解析版本；普通文件按当前内容执行。旧轮次快照保留。</p><label>新轮次执行目录<select id="round-workspace-mode"><option value="worktree" ${c.workspaceMode!=='direct'?'selected':''}>隔离副本（worktree）</option><option value="direct" ${c.workspaceMode==='direct'?'selected':''}>直接修改当前仓库</option></select></label><label>新轮次最大执行次数<input id="round-max-steps" type="number" min="1" max="50" step="1" value="50" required><span class="hint">设置本轮 LLM 最大执行步数（1–50）。</span></label><button id="new-ordinary-round">准备新一轮（不启动模型）</button><p id="ordinary-round-message" role="status"></p></section><section class="card"><h2>全部运行轮次</h2>${table(['轮次','创建时间','固定版本','入口'],data.rounds.map(r=>`<tr><td>${escape(r.roundId)}</td><td>${escape(displayTime(r.createdAt))}</td><td>${escape(r.baseCommit||'当前文件（无 Git 版本）')}</td><td><a href="#/tasks/${escape(r.runTaskId)}">查看执行与结果 →</a></td></tr>`))}</section>`);
+    shell(task.title||taskKey,`<section class="card"><h2>普通需求</h2>${historyFields([['项目',projectId],['需求编号',taskKey],['任务类型',c.kind],['背景 / 当前行为',c.current],['期望分析 / 行为',c.expected],['原版本引用',c.requestedRevision],['允许修改',c.kind==='read_code'?'只读':c.allowedPaths.join('、')]])}<p>Git 任务每轮重新解析版本；普通文件按当前内容执行。旧轮次快照保留。</p><label>新轮次执行目录<select id="round-workspace-mode"><option value="worktree" ${c.workspaceMode!=='direct'?'selected':''}>隔离副本（worktree）</option><option value="direct" ${c.workspaceMode==='direct'?'selected':''}>直接修改当前仓库</option></select></label><label>新轮次最大执行次数<input id="round-max-steps" type="number" min="1" max="50" step="1" value="50" required><span class="hint">设置本轮 LLM 最大执行步数（1–50）。</span></label><button id="new-ordinary-round">准备新一轮（不启动模型）</button><p id="ordinary-round-message" role="status"></p></section><section class="card"><h2>全部运行轮次</h2>${table(['轮次','创建时间','固定版本','入口','会话与审查'],data.rounds.map(r=>`<tr><td>${escape(r.roundId)}</td><td>${escape(displayTime(r.createdAt))}</td><td>${escape(r.baseCommit||'当前文件（无 Git 版本）')}</td><td><a href="#/tasks/${escape(r.runTaskId)}">查看执行与结果 →</a></td><td>${r.conversationId?`<a href="#chat/${escape(r.conversationId)}">原讨论</a> · `:''}<button class="secondary" data-review-task="${escape(r.runTaskId)}">围绕此版继续</button>${r.parentTaskId?`<p><a href="#/tasks/${escape(r.parentTaskId)}">上一版交付</a> · ${escape(r.feedback)}</p>`:''}${r.userReview?`<p>${escape(projectProgress(r))}</p>`:''}</td></tr>`))}</section>`);
+   const overview = document.createElement('section');
+   overview.className = 'card';
+   const accepted = data.rounds.filter(r => r.userReview?.decision === 'accepted')
+    .sort((a,b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+   overview.innerHTML = `<h2>需求讨论与交付</h2>
+    <button class="secondary" id="open-requirement-chat">打开需求讨论</button>
+    <p>${accepted ? `最近已接收版本：<a href="#/tasks/${escape(accepted.runTaskId)}">${escape(accepted.roundId)}</a> · ${escape(displayTime(accepted.userReview.at))}` : '尚无人工接收的版本。'}</p>`;
+   app.querySelector('.card').before(overview);
+   const openButton = overview.querySelector('button');
+   if(task.canDevelop===false){
+    openButton.hidden=true;
+    const newRound=document.querySelector('#new-ordinary-round');
+    newRound.hidden=true;
+    document.querySelector('#round-workspace-mode').closest('label').hidden=true;
+    document.querySelector('#round-max-steps').closest('label').hidden=true;
+   }
+   openButton.onclick = async () => {
+    openButton.disabled = true;
+    try {
+     const chatId = await openRequirementDiscussion(taskPath);
+     if (active()) location.hash = 'chat/' + chatId;
+    } catch(error) {
+     if (active()) {openButton.disabled=false;document.querySelector('#ordinary-round-message').textContent=error.message;}
+    }
+   };
+   for (const button of app.querySelectorAll('[data-review-task]')) {
+    if(task.canDevelop===false)button.hidden=true;
+    const round = data.rounds.find(item => item.runTaskId === button.dataset.reviewTask);
+    button.onclick = async () => {
+     button.disabled = true;
+     try {
+      const status = await get(`/api/tasks/${round.runTaskId}/execution`);
+      if (status.status !== 'terminated' || !status.resultAvailable)
+       throw new Error('本轮还没有可审查的终止交付。');
+      const delivery = await get(`/api/tasks/${round.runTaskId}/execution/result`);
+      if (delivery.patchExport?.status !== 'saved' || delivery.review?.status !== 'passed')
+       throw new Error('这版缺少完整补丁或范围审查。可在 Chat 选择继续需求，按当前版本开新轮。');
+      if (!active()) return;
+      const chatId = round.conversationId || await openRequirementDiscussion(taskPath);
+      if(active()) location.hash = `chat/${chatId}/${round.runTaskId}`;
+     } catch(error) {
+      if(active()) {button.disabled=false;document.querySelector('#ordinary-round-message').textContent=error.message;}
+     }
+    };
+   }
    ordinaryRoundControl(taskPath,projectId,taskKey);return 'ordinary';
   }
   if(!roundId){const [task,roundData]=await Promise.all([get(taskPath),get(taskPath+'/rounds')]);if(!active())return;if(!Array.isArray(roundData.rounds))throw new Error('轮次列表格式异常');shell(task.title||taskKey,`<section class="card"><h2>需求身份</h2>${historyFields([['项目',projectId],['需求',taskKey],['模式',task.mode],['Issue',task.issueId],['需求引用',task.requirementRef],['需求版本',task.requirementRevision],['历史可用性',task.historyAvailability]])}<p class="hint">当前需求引用不是历史轮次快照，缺失版本不补造。</p><div id="legacy-history-links"></div></section><section class="card"><h2>多轮记录</h2><p class="hint">prepare 目录不代表从未运行模型；verify-02 是同轮追加验收，不是第二次模型运行。历史运行状态不用于推断当前存活。</p>${roundData.rounds.length?table(['轮次 / 来源','原总报告结论','Agent 停止状态','P 导出','独立验收次数','入口'],roundData.rounds.filter(r=>r.association!=='unlinked'&&r.taskKey!==null).map(r=>`<tr><td>${escape(r.roundId)}<br>${escape(historyValue(r.entry))} / ${escape(historyValue(r.sourceFormat))}<br>${escape(r.createdAt?displayTime(r.createdAt):'时间未记录')}</td><td>${escape(historyValue(r.originalRunConclusion))}</td><td>${escape(historyValue(r.agentStatus))}</td><td>${escape(historyValue(r.exportStatus))}</td><td>${escape(historyValue(r.verificationCount))}</td><td><a href="${historyHref([projectId,'tasks',taskKey,'rounds',r.roundId])}">查看轮次 →</a></td></tr>`)):'<p class="empty">没有可明确关联的轮次，不补造运行。</p>'}</section><section class="card"><h2>未关联材料</h2>${roundData.rounds.filter(r=>r.association==='unlinked'||r.taskKey===null).map(r=>`<p><a href="${historyHref([projectId,'tasks',taskKey,'rounds',r.roundId])}">${escape(r.roundId)} →</a> · ${escape(historyValue(r.sourceFormat))} · 不推断归属</p>`).join('')||'<p class="hint">没有返回未关联材料。</p>'}<p>${escape(Array.isArray(roundData.warnings)?roundData.warnings.join('；'):'')}</p></section>`);return;}
@@ -670,6 +839,7 @@ async function render() {
  chatCleanup();
  chatCleanup = () => {};
  pageEpoch++;
+ if (!renderAuth(app)) return;
  const epoch=pageEpoch;
  const hash=location.hash.slice(1);
  if(!hash || hash==='chat' || hash.startsWith('chat/')) {
@@ -677,14 +847,15 @@ async function render() {
   document.querySelector('#breadcrumb').textContent='工作台 / Chat';
   const parts=hash.split('/');
   const conversationId=parts[1] || null;
-  if(parts.length>2 || conversationId && !/^[0-9a-f]{32}$/.test(conversationId)) {
+  const reviewTask = parts[2] || null;
+  if(parts.length>3 || reviewTask && !/^[0-9a-f]{32}$/.test(reviewTask) || conversationId && !/^[0-9a-f]{32}$/.test(conversationId)) {
    app.innerHTML='<p role="alert">会话链接无效。</p><a class="button" href="#chat">返回 Chat</a>';
   } else {
    app.innerHTML='<p class="muted">正在载入会话…</p>';
    try {
     const {mountChat}=await import('./chat.js');
     if(pageEpoch!==epoch)return;
-    chatCleanup=mountChat(app,conversationId);
+    chatCleanup=mountChat(app,conversationId,reviewTask);
    } catch {
     if(pageEpoch===epoch)app.innerHTML='<p role="alert">Chat 页面加载失败，请刷新重试。</p>';
    }
@@ -693,6 +864,16 @@ async function render() {
  else if(hash==='projects'||hash.startsWith('projects/')) {
   const parts=hash.split('/').slice(1).map(decodeURIComponent);
   document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#projects'));
+  if(projectMode()&&parts[1]==='access'&&parts.length<=3){
+   document.querySelector('#breadcrumb').textContent='工作台 / 项目成员与执行审批';
+   await mountProjectAccess(app,parts[0],parts[2],()=>pageEpoch===epoch);
+   return;
+  }
+  if(projectMode()&&parts[1]==='audit'&&parts.length===3){
+   document.querySelector('#breadcrumb').textContent='工作台 / 执行审计';
+   await mountExecutionAudit(app,parts[0],parts[2],()=>pageEpoch===epoch);
+   return;
+  }
   const mode=await projectHistory(parts);
   if(pageEpoch===epoch&&mode!=='ordinary'&&parts.length===3&&parts[1]==='tasks'){
    app.insertAdjacentHTML('beforeend',`<section class="card"><h2>运行控制</h2><div id="experiment-run-control"><p>正在查询实验运行状态…</p></div><dialog id="experiment-start-review" aria-label="启动真实实验确认"><h2>确认启动真实实验</h2><p><strong>${escape(parts[2])}</strong></p><p>本次会创建新的工作副本，调用已配置模型，随后导出候选补丁并在新副本中执行独立验收。</p><p class="notice">需求和检查目标由后端登记；网页不会提交自定义命令、环境或密钥。模型结束不等于独立验收通过。</p><div class="actions"><button id="confirm-experiment-start">确认启动</button><button class="secondary" id="cancel-experiment-start">取消</button></div></dialog></section>`);
@@ -718,4 +899,7 @@ async function render() {
  }
  window.scrollTo(0,0);
 }
-window.addEventListener('hashchange',render);render();
+initializeAuth(render).then(() => {
+ window.addEventListener('hashchange', render);
+ render();
+});

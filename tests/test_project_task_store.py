@@ -88,5 +88,6 @@ class RequirementOrderingTest(unittest.TestCase):
         service = TaskService.__new__(TaskService)
         service.projects = SimpleNamespace(list=lambda:[{'projectId':'sample'}])
         service.store = SimpleNamespace(requirements=lambda project:values, rounds=lambda project,key:[])
+        service.chat = None
         result = service.ordinary_tasks('sample')
         self.assertEqual(['maxsteps','middle','older'],[v['taskKey'] for v in result['tasks']])

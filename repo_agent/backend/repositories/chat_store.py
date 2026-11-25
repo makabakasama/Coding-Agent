@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 from datetime import datetime
 import hashlib
 import json
@@ -15,8 +16,9 @@ from repo_agent.infrastructure.file_io import now
 
 
 class ChatStore:
-    def __init__(self, store):
+    def __init__(self, store, audit=None):
         self.store = store
+        self.audit = audit
         self.namespace = hashlib.sha256(str(store.root).encode()).hexdigest()
         with store._connection() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS chat_conversations (
@@ -46,10 +48,22 @@ class ChatStore:
                 reason text)''')
             conn.execute('''CREATE INDEX IF NOT EXISTS chat_turn_jobs_pending
                 ON chat_turn_jobs(namespace, status, queued_at, turn_id)''')
+            conn.execute('ALTER TABLE chat_turn_jobs ADD COLUMN IF NOT EXISTS authorization_proof jsonb')
+            conn.execute('ALTER TABLE chat_turn_jobs ADD COLUMN IF NOT EXISTS authorized_execution_id text')
             conn.execute('''CREATE TABLE IF NOT EXISTS chat_turn_events (
                 turn_id text NOT NULL REFERENCES chat_turns(turn_id),
                 seq bigint NOT NULL CHECK(seq > 0), record jsonb NOT NULL,
                 PRIMARY KEY(turn_id, seq))''')
+
+    def task_conversations(self, task_ids):
+        if not task_ids:
+            return {}
+        with self.store._connection() as conn:
+            rows = conn.execute('''SELECT t.turn_id,c.conversation_id
+                FROM chat_turns t JOIN chat_conversations c USING(conversation_id)
+                WHERE c.namespace=%s AND t.turn_id=ANY(%s)
+                AND t.record->>'taskId'=t.turn_id''', (self.namespace, list(task_ids))).fetchall()
+        return dict(rows)
 
     def _conversation(self, conn, conversation_id, *, lock=False):
         suffix = ' FOR UPDATE' if lock else ''
@@ -60,13 +74,29 @@ class ChatStore:
             raise TaskError(404, 'CONVERSATION_NOT_FOUND', '会话不存在')
         return row
 
-    def create(self, value):
+    def create(self, value, *, owner_id=None):
         identifier, stamp = uuid.uuid4().hex, now()
         record = {'schemaVersion': 1, 'conversationId': identifier,
                   'title': value['title'], 'workspaceRef': value['workspaceRef'],
                   'revision': 0, 'activeTurnId': None, 'latestTurnId': None,
                   'createdAt': stamp, 'updatedAt': stamp}
+        requirement = value.get('requirement')
+        if owner_id is not None:
+            record['ownerAccountId'] = owner_id
+        if requirement:
+            record['requirement'] = requirement
         with self.store._connection() as conn:
+            if requirement:
+                # Serialize opening this discussion, including the first request from two tabs.
+                key = requirement['taskKey']
+                conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))',
+                             (json.dumps([self.namespace, value['workspaceRef'], key]),))
+                existing = conn.execute("""SELECT record FROM chat_conversations
+                    WHERE namespace=%s AND record->>'workspaceRef'=%s
+                    AND record->'requirement'->>'taskKey'=%s""",
+                    (self.namespace, value['workspaceRef'], key)).fetchone()
+                if existing:
+                    return existing[0]
             conn.execute('''INSERT INTO chat_conversations
                 (conversation_id, namespace, record, updated_at) VALUES (%s,%s,%s,%s)''',
                          (identifier, self.namespace, self.store._json(record), stamp))
@@ -83,7 +113,7 @@ class ChatStore:
                 record = {**record, 'latestTurnId': row[0] if row else None}
             return record
 
-    def list(self, *, cursor=None, limit=50):
+    def list(self, *, cursor=None, limit=50, project=None, project_ids=None, owner_id=None):
         validate_page(limit)
         condition, parameters = '', [self.namespace]
         if cursor is not None:
@@ -103,6 +133,17 @@ class ChatStore:
                 raise TaskError(400, 'INVALID_PAGINATION', '会话列表游标无效') from exc
             condition = ' AND (updated_at, conversation_id) < (%s::timestamptz,%s)'
             parameters.extend((stamp, identifier))
+        if project is not None:
+            condition += " AND record->>'workspaceRef'=%s"
+            parameters.append(project)
+        if project_ids is not None:
+            condition += """ AND ((record->>'workspaceRef')=ANY(%s)
+                OR (record->>'workspaceRef' IS NULL AND record->>'ownerAccountId'=%s))"""
+            parameters.extend((list(project_ids), owner_id))
+        elif owner_id is not None:
+            condition += """ AND (record->>'workspaceRef' IS NOT NULL
+                OR record->>'ownerAccountId' IS NULL OR record->>'ownerAccountId'=%s)"""
+            parameters.append(owner_id)
         parameters.append(limit + 1)
         with self.store._connection() as conn:
             rows = conn.execute('''SELECT record FROM chat_conversations WHERE namespace=%s'''
@@ -129,14 +170,18 @@ class ChatStore:
         return {'messages': records, 'hasMore': len(rows) > limit,
                 'nextAfterSeq': records[-1]['seq'] if records else after_seq}
 
-    def submit(self, conversation_id, value):
+    def submit(self, conversation_id, value, *, connection=None, authorization=None, execution_id=None):
         validate_chat_id(conversation_id)
         # Revision is a concurrency precondition, not part of the request's semantic identity.
         request = {key: item for key, item in value.items()
                    if key not in ('expectedRevision', 'frozenBaseCommit', '_clientRequestHash')}
         request_hash = value.get('_clientRequestHash') or hashlib.sha256(
             json.dumps(request, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
-        with self.store._connection() as conn:
+        with (nullcontext(connection) if connection is not None else self.store._connection()) as conn:
+            if self.audit is not None:
+                self.audit.lock(conn)
+                if self.audit.required(conn) and not authorization:
+                    raise TaskError(403, 'AUTH_APPROVAL_REQUIRED', '账号模式需要明确的会话提交身份')
             conversation, sequence = self._conversation(conn, conversation_id, lock=True)
             previous = conn.execute('''SELECT request_hash, record FROM chat_turns
                 WHERE conversation_id=%s AND client_request_id=%s''',
@@ -153,8 +198,14 @@ class ChatStore:
             policy = {'mode': value['mode'], 'allowWrites': execute,
                       'allowTests': value['execution']['allowTests'] if execute else False,
                       'allowedTools': read_tools, 'workspaceRef': conversation['workspaceRef']}
+            if conversation.get('requirement'):
+                policy['requirement'] = conversation['requirement']
             if execute:
                 policy['executionContract'] = value['execution']
+                if 'requirementKey' in value:
+                    policy['requirementKey'] = value['requirementKey']
+                if 'reviewBase' in value:
+                    policy['reviewBase'] = value['reviewBase']
                 policy['frozenBaseCommit'] = value.get('frozenBaseCommit')
             turn = {'schemaVersion': 1, 'turnId': turn_id, 'conversationId': conversation_id,
                     'clientRequestId': value['clientRequestId'], 'mode': value['mode'],
@@ -172,8 +223,12 @@ class ChatStore:
                 (message_id,conversation_id,turn_id,seq,role,record) VALUES (%s,%s,%s,%s,'user',%s)''',
                          (message_id, conversation_id, turn_id, sequence, self.store._json(message)))
             conn.execute('''INSERT INTO chat_turn_jobs
-                (turn_id,namespace,job_kind,status,queued_at) VALUES (%s,%s,%s,'queued',%s)''',
-                         (turn_id, self.namespace, 'execute_bridge' if execute else 'discuss', stamp))
+                (turn_id,namespace,job_kind,status,queued_at,authorization_proof,authorized_execution_id)
+                VALUES (%s,%s,%s,'queued',%s,%s,%s)''',
+                         (turn_id, self.namespace, 'execute_bridge' if execute else 'discuss', stamp,
+                          self.store._json(authorization) if authorization else None, execution_id))
+            if authorization and self.audit is not None:
+                self.audit.job_event(conn, 'chat_queued', turn_id, execution_id, authorization, stage='chat')
             event = {'seq': 1, 'at': stamp, 'type': 'turn_queued', 'turnId': turn_id}
             conn.execute('INSERT INTO chat_turn_events(turn_id,seq,record) VALUES (%s,1,%s)',
                          (turn_id, self.store._json(event)))
@@ -234,7 +289,12 @@ class ChatStore:
 
     def claim(self, worker_id):
         with self.store._connection() as conn:
-            row = conn.execute('''SELECT c.conversation_id, j.turn_id
+            required = False
+            if self.audit is not None:
+                self.audit.lock(conn)
+                required = self.audit.required(conn)
+            row = conn.execute('''SELECT c.conversation_id,j.turn_id,c.record,j.job_kind,
+                    j.authorization_proof,j.authorized_execution_id
                 FROM chat_turn_jobs j JOIN chat_turns t USING(turn_id)
                 JOIN chat_conversations c USING(conversation_id)
                 WHERE j.namespace=%s AND c.namespace=%s AND j.status='queued'
@@ -243,21 +303,38 @@ class ChatStore:
                                (self.namespace, self.namespace)).fetchone()
             if row is None:
                 return None
-            conversation_id, turn_id = row
+            conversation_id, turn_id, conversation, job_kind, proof, execution_id = row
+            turn = self._turn(conn, conversation_id, turn_id)
+            reason = (self.audit.authorize_chat(conn, conversation, turn, job_kind, proof, execution_id)
+                      if self.audit is not None and (required or proof is not None) else None)
             claim_id, stamp = uuid.uuid4().hex, now()
             claimed = conn.execute('''UPDATE chat_turn_jobs SET status='running', worker_id=%s, claim_id=%s,
-                started_at=%s, heartbeat_at=now() WHERE turn_id=%s AND status='queued'
-                RETURNING turn_id''', (worker_id, claim_id, stamp, turn_id)).fetchone()
+                started_at=%s, heartbeat_at=%s WHERE turn_id=%s AND status='queued'
+                RETURNING turn_id''', (worker_id, claim_id, None if reason else stamp,
+                                       None if reason else stamp, turn_id)).fetchone()
             if claimed is None:
                 return None
-            turn = self._turn(conn, conversation_id, turn_id)
+            claim = {'conversationId': conversation_id, 'turnId': turn_id,
+                     'workerId': worker_id, 'claimId': claim_id}
+            if proof is not None and job_kind == 'execute_bridge':
+                claim['authorization'] = proof
+                claim['authorizedExecutionId'] = execution_id
+            if reason:
+                self.audit.job_event(conn, 'chat_authorization_denied', turn_id, execution_id,
+                                     proof if isinstance(proof, dict) else {'projectId': conversation.get('workspaceRef')},
+                                     worker_id, reason, stage='chat')
+                self.finish(claim, {'status': 'failed', 'stopReason': reason}, connection=conn)
+                return None
             turn = {**turn, 'status': 'running',
                     'stage': 'bridge' if turn['mode'] == 'execute' else 'model', 'startedAt': stamp}
             conn.execute('UPDATE chat_turns SET record=%s WHERE turn_id=%s',
                          (self.store._json(turn), turn_id))
             self._event(conn, turn_id, {'type': 'turn_started'})
-        return {'conversationId': conversation_id, 'turnId': turn_id,
-                'workerId': worker_id, 'claimId': claim_id}
+            if proof and self.audit is not None:
+                self.audit.job_event(conn, 'chat_authorization_passed', turn_id, execution_id, proof,
+                                     worker_id, stage='chat')
+                self.audit.job_event(conn, 'chat_claimed', turn_id, execution_id, proof, worker_id, stage='chat')
+        return claim
 
     def heartbeat(self, session, worker_id):
         session.execute('''UPDATE chat_turn_jobs SET heartbeat_at=now()
@@ -361,11 +438,11 @@ class ChatStore:
                 raise TaskError(409, 'CHAT_CLAIM_LOST', '轮次已结束')
             return self._event(conn, claim['turnId'], value)
 
-    def finish(self, claim, result, *, recovered=False):
+    def finish(self, claim, result, *, recovered=False, connection=None):
         status = result['status']
         if status not in ('completed', 'failed'):
             raise ValueError('A chat result must be completed or failed')
-        with self.store._connection() as conn:
+        with (nullcontext(connection) if connection is not None else self.store._connection()) as conn:
             conversation, sequence, turn, current = self._owned(conn, claim)
             if turn['status'] in ('completed', 'failed'):
                 return turn
@@ -414,6 +491,13 @@ class ChatStore:
                           claim['conversationId'], self.namespace))
             self._event(conn, claim['turnId'], {'type': 'turn_finished', 'status': status,
                                                'stopReason': result['stopReason'], 'recovered': recovered})
+            if self.audit is not None:
+                proof, execution = conn.execute('''SELECT authorization_proof,authorized_execution_id
+                    FROM chat_turn_jobs WHERE turn_id=%s''', (claim['turnId'],)).fetchone()
+                if isinstance(proof, dict) or (result.get('stopReason') or '').startswith('AUTH_'):
+                    self.audit.job_event(conn, 'chat_finished', claim['turnId'], execution,
+                                         proof if isinstance(proof, dict) else {'projectId': conversation.get('workspaceRef')},
+                                         claim['workerId'], result['stopReason'], stage='chat')
         return turn
 
     def interrupted(self):

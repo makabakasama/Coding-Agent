@@ -104,9 +104,11 @@ class DatabaseTaskStore(ProjectTaskStore):
             deleted = conn.execute('SELECT 1 FROM task_trash WHERE task_id=%s', (task_id,)).fetchone()
         return deleted is not None
 
-    def set_deleted(self, task_id, deleted):
+    def set_deleted(self, task_id, deleted, *, audit=None, actor=None):
         self.get(task_id)
         with self._connection() as conn:
+            if audit is not None:
+                audit.lock(conn)
             # Enqueue takes this same lock. Claim and deletion serialize on dispatch.
             conn.execute('SELECT task_id FROM task_runs WHERE task_id=%s FOR UPDATE', (task_id,)).fetchone()
             dispatch = conn.execute('SELECT status,to_jsonb(d) FROM task_dispatch d WHERE task_id=%s FOR UPDATE',
@@ -118,6 +120,14 @@ class DatabaseTaskStore(ProjectTaskStore):
                              (task_id, self._json(dispatch[1]) if dispatch else None))
                 # Restoring a queued task requires a fresh explicit start.
                 conn.execute("DELETE FROM task_dispatch WHERE task_id=%s AND status='queued'", (task_id,))
+                if audit is not None and dispatch and dispatch[0] == 'queued':
+                    row = dispatch[1]
+                    proof = row.get('authorization_proof')
+                    if isinstance(proof, dict):
+                        execution = row['execution_id']
+                        audit.event(conn, f'task:{execution}:task_finished', 'task_finished',
+                                    request=proof.get('requestId'), task=task_id, execution=execution,
+                                    project=proof.get('projectId'), actor=actor, reason='TASK_TRASHED_BEFORE_CLAIM')
             else:
                 conn.execute('DELETE FROM task_trash WHERE task_id=%s', (task_id,))
         if self.cache:
@@ -207,7 +217,7 @@ class DatabaseTaskStore(ProjectTaskStore):
                             '任务已存入数据库，本地材料生成失败，读取该任务可重试生成') from exc
         return directory
 
-    def create(self, build_record, *, requirement=None, task_id=None):
+    def create(self, build_record, *, requirement=None, task_id=None, review_base=None):
         task_id = task_id or uuid.uuid4().hex
         if not TASK_ID.fullmatch(task_id):
             raise ValueError('Invalid preallocated task id')
@@ -226,6 +236,8 @@ class DatabaseTaskStore(ProjectTaskStore):
                     'display_timezone': 'UTC+08:00', 'mode': 'ordinary',
                     'projectId': value['projectId'], 'taskKey': key,
                     'runTaskId': task_id, 'sourceFormat': 'ordinary_v2'}
+        if review_base:
+            metadata['reviewBase'] = review_base
         with self._connection() as conn:
             conn.execute("INSERT INTO tasks VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
                          (key, value['projectId'], self._json(value)))
@@ -248,9 +260,36 @@ class DatabaseTaskStore(ProjectTaskStore):
         self._materialize(row)
         return row[0]
 
+    def project_for_task(self, task_id):
+        if not TASK_ID.fullmatch(task_id):
+            raise TaskError(404, 'TASK_NOT_FOUND', '任务不存在')
+        self.assert_not_purged(task_id)
+        with self._connection() as conn:
+            row = conn.execute("""SELECT t.project_id, r.record->'contract'->>'projectId'
+                FROM task_runs r JOIN tasks t USING(task_key)
+                WHERE r.task_id=%s""", (task_id,)).fetchone()
+        if row:
+            if row[0] != row[1]:
+                raise TaskError(404, 'TASK_NOT_FOUND', '任务不存在')
+            return row[0]
+        legacy = ProjectTaskStore(self.root, self.runs_root, self.project_workspaces)
+        return legacy.get(task_id)['contract']['projectId']
+
     def directory(self, task_id):
         row = self._run(task_id)
         return self._materialize(row) if row else super().directory(task_id)
+
+    def save_draft_requirement(self, record):
+        key = record['taskKey']
+        with self._connection() as conn:
+            row = conn.execute("""INSERT INTO tasks(task_key,project_id,record) VALUES (%s,%s,%s)
+                ON CONFLICT (task_key) DO NOTHING RETURNING record""",
+                (key, record['projectId'], self._json(record))).fetchone()
+            if row is None:
+                row = conn.execute('SELECT record FROM tasks WHERE task_key=%s', (key,)).fetchone()
+                if not row or any(row[0].get(k) != v for k, v in record.items() if k != 'createdAt'):
+                    raise TaskError(409, 'REQUEST_ID_REUSED', '请求编号已用于不同需求')
+        return row[0]
 
     def requirement(self, project, key):
         def load():
@@ -267,14 +306,36 @@ class DatabaseTaskStore(ProjectTaskStore):
                 records[row[0]['taskKey']] = row[0]
         return list(records.values())
 
-    def latest(self, *, deleted=False):
-        records = {r['taskId']: r for r in super().latest(deleted=deleted)}
+    def latest(self, *, deleted=False, project_ids=None):
+        if project_ids is None:
+            records = {r['taskId']: r for r in super().latest(deleted=deleted)}
+        else:
+            if not project_ids:
+                return []
+            legacy = ProjectTaskStore(self.root, self.runs_root, self.project_workspaces)
+            records = {r['taskId']: r for r in legacy.latest(deleted=deleted, project_ids=project_ids)}
+        scope, params = '', [deleted]
+        if project_ids is not None:
+            scope = ' AND t.project_id=ANY(%s)'
+            params.append(list(project_ids))
         with self._connection() as conn:
+            if project_ids is not None and records:
+                overlapping = conn.execute('SELECT task_id FROM task_runs WHERE task_id=ANY(%s)',
+                                           (list(records),)).fetchall()
+                for (task_id,) in overlapping:
+                    records.pop(task_id, None)
             for row in conn.execute('''SELECT r.record FROM task_runs r
+                    JOIN tasks t USING(task_key)
                     LEFT JOIN task_trash trash USING(task_id) WHERE (trash.task_id IS NOT NULL)=%s
-                    ORDER BY r.created_at DESC,r.task_id DESC LIMIT 50''', (deleted,)):
+                    ''' + scope + ' ORDER BY r.created_at DESC,r.task_id DESC LIMIT 50', params):
+                if project_ids is not None and row[0]['contract']['projectId'] not in project_ids:
+                    continue
                 if not self.purge_path(row[0]['taskId']).exists():
                     records[row[0]['taskId']] = row[0]
+            if project_ids is not None and records and not deleted:
+                for (task_id,) in conn.execute('SELECT task_id FROM task_trash WHERE task_id=ANY(%s)',
+                                               (list(records),)):
+                    records.pop(task_id, None)
         return sorted(records.values(), key=lambda r: (datetime.fromisoformat(r['createdAt'].replace('Z', '+00:00')),
                                                        r['taskId']), reverse=True)[:50]
 
@@ -287,6 +348,15 @@ class DatabaseTaskStore(ProjectTaskStore):
             if not self.purge_path(row[0]['taskId']).exists():
                 self._materialize(row)
         return super().rounds(project, key)
+
+    def latest_project_runs(self, project):
+        with self._connection() as conn:
+            rows = conn.execute('''SELECT DISTINCT ON (r.task_key) r.task_key,r.task_id
+                FROM task_runs r JOIN tasks t USING(task_key)
+                LEFT JOIN task_trash trash USING(task_id)
+                WHERE t.project_id=%s AND trash.task_id IS NULL
+                ORDER BY r.task_key,r.created_at DESC,r.task_id DESC''', (project,)).fetchall()
+        return dict(rows)
 
     def round_counts(self, project):
         with self._connection() as conn:

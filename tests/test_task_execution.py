@@ -1,5 +1,6 @@
 """Offline M3 integration: injected decisions, synthetic repos and real loopback HTTP."""
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -368,9 +369,17 @@ class ExecutionTest(unittest.TestCase):
                      Decision("finish", {"answer": "secret " + token})]
         self.service = self.service_for(lambda: ScriptedModel(decisions))
         task_id = self.task(allowTests=False, checkTargets=[])
-        with patch.dict("os.environ", {"SYNTHETIC_API_KEY": token}):
+        name = "SYNTHETIC_API_KEY"
+        previous = os.environ.get(name)
+        os.environ[name] = token
+        try:
             self.service.execution.start(task_id, {})
             result = self.finish(task_id)
+        finally:
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
         self.assertEqual("not_exported", result["patchExport"]["status"])
         directory = self.data / f"task_{task_id}/execution"
         self.assertFalse((directory / "candidate.patch").exists())

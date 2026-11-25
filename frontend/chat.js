@@ -1,3 +1,6 @@
+import {apiFetch as fetch, canAdministerInstance, projectMode} from './auth.js';
+import {projectAccessHref} from './project-access.js';
+
 const localDrafts = new Map();
 const identifier = value => typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
 const integer = value => Number.isSafeInteger(value) && value >= 0;
@@ -95,7 +98,7 @@ function renderText(container, text) {
   }
 }
 
-export function mountChat(root, conversationId = null) {
+export function mountChat(root, conversationId = null, reviewTask = null) {
   let closed = false;
   let timer;
   let syncing = false;
@@ -142,7 +145,7 @@ export function mountChat(root, conversationId = null) {
         <button type="button" class="secondary" id="chat-list-more" hidden>更多会话</button>
       </section>
       <section class="chat-workspace" aria-label="对话">
-        <div class="chat-top"><div><h2 id="chat-title">开始一段对话</h2><p id="chat-workspace" class="muted">可选择项目后讨论需求。</p></div><span class="badge">讨论</span></div>
+        <div class="chat-top"><div><h2 id="chat-title">开始一段对话</h2><p id="chat-workspace" class="muted">可选择项目后讨论需求。</p></div><a id="chat-project-tasks" hidden>项目需求与交付</a></div>
         <p id="chat-connection" class="chat-error" role="status"></p>
         <div id="chat-messages" class="chat-messages" role="log" aria-label="对话消息"><p class="chat-empty">新建会话后发送问题。</p></div>
         <button type="button" class="chat-link-button" id="chat-messages-more" hidden>继续加载消息</button>
@@ -161,6 +164,7 @@ export function mountChat(root, conversationId = null) {
           <textarea id="chat-input" rows="3" placeholder="输入问题或讨论需求，支持多轮追问"></textarea>
           <label class="chat-execute-choice"><input type="checkbox" id="chat-execute">本轮授权修改项目</label>
           <div id="chat-execution-fields" class="chat-execution-fields" hidden>
+            <label id="chat-review-label" hidden>本轮归属<select id="chat-review-base"><option value="">新需求</option></select></label>
             <label>修改类型<select id="chat-execution-kind"><option value="fix_bug">修复问题</option><option value="add_feature">新增功能</option></select></label>
             <label>允许修改的相对路径<input id="chat-execution-scope" placeholder="例如 src/parser.py；多个路径用逗号分隔"></label>
             <label>工作方式<select id="chat-execution-workspace"><option value="direct">直接修改当前项目</option><option value="worktree">在独立工作副本修改</option></select></label>
@@ -200,8 +204,52 @@ export function mountChat(root, conversationId = null) {
   $('#chat-execution-targets').value = execution.checkTargets;
   const splitPaths = value => value.split(/[,\n]/).map(item => item.trim()).filter(Boolean);
 
+  const reviewSelect = $('#chat-review-base');
+  let loadedRequirements = false;
+  async function loadRequirements(project) {
+    if (loadedRequirements || !project || conversation?.requirement) return;
+    loadedRequirements = true;
+    try {
+      const data = await request('/api/projects/' + encodeURIComponent(project) + '/tasks');
+      if (closed) return;
+      for (const item of data.tasks.filter(item => item.mode === 'ordinary'))
+        reviewSelect.add(new Option('继续需求 · ' + item.title.slice(0,80), 'req:' + item.taskKey));
+      const savedKey = local.pending?.execution?.requirementKey || local.execution.requirementKey;
+      if (!parent && savedKey && [...reviewSelect.options].some(o => o.value === 'req:' + savedKey))
+        reviewSelect.value = 'req:' + savedKey;
+      $('#chat-review-label').hidden = false;
+    } catch (error) {
+      loadedRequirements = false;
+      if (!closed) $('#chat-send-error').textContent = '需求列表读取失败：' + error.message;
+    }
+  }
+  const parent = local.pending ? local.pending.execution?.parentTaskId : reviewTask;
+  let reviewMode = null;
+  if (parent) {
+    reviewSelect.add(new Option('返工 · ' + parent, parent));
+    reviewSelect.value = parent;
+    $('#chat-review-label').hidden = false;
+    request(`/api/tasks/${parent}`).then(task => {
+      if (closed) return;
+      [...reviewSelect.options].find(o => o.value === parent).textContent = '基于交付 · ' + task.contract.current.slice(0,80);
+      reviewMode = task.contract.workspaceMode || 'worktree';
+      if (reviewSelect.value !== parent) return;
+      $('#chat-execution-workspace').value = reviewMode;
+      if (!local.pending && !$('#chat-execution-scope').value)
+        $('#chat-execution-scope').value = task.contract.allowedPaths.join(', ');
+      updateComposer();
+    }).catch(error => {if (!closed) $('#chat-send-error').textContent = error.message;});
+  }
+  if (reviewTask) input.placeholder = '写下对所选交付的意见；需要返工时勾选本轮授权修改项目';
+  reviewSelect.onchange = () => {
+    if (reviewSelect.value === parent && reviewMode) $('#chat-execution-workspace').value = reviewMode;
+    updateComposer();
+  };
   function executionOptions() {
-    return {kind: $('#chat-execution-kind').value,
+    const selection = reviewSelect.value;
+    const association = selection.startsWith('req:') ? {requirementKey:selection.slice(4)}
+      : selection ? {parentTaskId:selection} : {};
+    return {...association, kind: $('#chat-execution-kind').value,
       allowedPaths: splitPaths($('#chat-execution-scope').value),
       workspaceMode: $('#chat-execution-workspace').value,
       revision: 'HEAD', maxSteps: Number($('#chat-execution-steps').value),
@@ -212,7 +260,8 @@ export function mountChat(root, conversationId = null) {
   }
 
   function saveExecutionSettings() {
-    Object.assign(local.execution, {kind: $('#chat-execution-kind').value,
+    Object.assign(local.execution, {requirementKey:reviewSelect.value.startsWith('req:') ? reviewSelect.value.slice(4) : null,
+      kind: $('#chat-execution-kind').value,
       scope: $('#chat-execution-scope').value, workspaceMode: $('#chat-execution-workspace').value,
       maxSteps: Number($('#chat-execution-steps').value),
       allowTests: $('#chat-execution-tests').checked,
@@ -253,6 +302,10 @@ export function mountChat(root, conversationId = null) {
     if (local.pending?.clientRequestId !== requestId) return;
     if (local.draft === local.pending.content) local.draft = '';
     if (local.pending.mode === 'execute') local.mode = 'discuss';
+    if (local.pending?.execution?.parentTaskId) {
+      reviewSelect.value = '';
+      if (reviewTask) history.replaceState(null, '', '#chat/' + conversationId);
+    }
     local.pending = null;
     persistDraft();
     if (!closed) {
@@ -268,30 +321,33 @@ export function mountChat(root, conversationId = null) {
     if (input.value !== savedText) input.value = savedText;
     const count = Array.from(input.value).length;
     const activeTurn = Boolean(conversation?.activeTurnId);
+    const readOnly = conversation?.canPost === false;
     const mode = local.pending?.mode || local.mode;
     const changing = mode === 'execute';
     const settings = changing ? executionOptions() : null;
     executeBox.checked = changing;
-    executeBox.disabled = sending || Boolean(local.pending) || !conversation?.workspaceRef;
+    executeBox.disabled = readOnly || sending || Boolean(local.pending) || !conversation?.workspaceRef;
     $('#chat-execution-fields').hidden = !changing;
     $('#chat-execution-targets-label').hidden = !$('#chat-execution-tests').checked;
     for (const field of $('#chat-execution-fields').querySelectorAll('input,select')) {
       field.disabled = sending || Boolean(local.pending);
     }
     $('#chat-execution-temporary-checks').disabled ||= !$('#chat-execution-tests').checked;
-    input.readOnly = sending || Boolean(local.pending);
+    $('#chat-execution-workspace').disabled ||= Boolean(reviewSelect.value && !reviewSelect.value.startsWith('req:'));
+    input.readOnly = readOnly || sending || Boolean(local.pending);
     $('#chat-count').textContent = `${count} / ${changing ? 4000 : 8000}`;
     $('#chat-send').textContent = local.pending && !sending ? '重试原请求' : sending ? '正在提交…'
-      : changing ? '授权并执行' : '发送';
-    $('#chat-send').disabled = sending || !conversation || refreshRequired
+      : changing ? (projectMode() ? '提交编码申请' : '授权并执行') : '发送';
+    $('#chat-send').disabled = readOnly || sending || !conversation || refreshRequired
       || (!local.pending && (count === 0 || count > (changing ? 4000 : 8000) || !input.value.trim()
         || changing && (!conversation.workspaceRef || !settings.allowedPaths.length
+          || Boolean(settings.parentTaskId && !reviewMode)
           || !Number.isInteger(settings.maxSteps) || settings.maxSteps < 1 || settings.maxSteps > 50
           || settings.allowTests && !settings.allowTemporaryChecks && !settings.checkTargets.length)));
-    $('#chat-send-note').textContent = local.pending
+    $('#chat-send-note').textContent = readOnly ? '你可以阅读该项目会话。' : local.pending
       ? '该请求的提交结果待确认，重试会沿用原请求编号。'
       : activeTurn ? '本轮正在处理；新消息会排队，待前面的轮次结束后依次处理。'
-        : changing ? '本轮会按上面的修改范围与检查权限执行。'
+        : changing ? (projectMode() ? '实例管理员放行后才会排队执行。' : '本轮会按上面的修改范围与检查权限执行。')
           : '回复按整轮显示；关联项目后可按需读取文件。';
   }
 
@@ -407,8 +463,14 @@ export function mountChat(root, conversationId = null) {
       sync();
     });
     source.onerror = () => {
-      if (streamSource === source && streamLabel && streamPreview?.isConnected)
+      if (closed || streamSource !== source) return;
+      if (streamLabel && streamPreview?.isConnected)
         streamLabel.textContent = 'Agent · 连接恢复中，已有文本尚未确认完成';
+      if (source.readyState === EventSource.CLOSED) {
+        streamSource = null;
+        streamTurnId = null;
+        sync();
+      }
       // EventSource reconnects with Last-Event-ID; no turn is resubmitted.
     };
   }
@@ -483,7 +545,8 @@ export function mountChat(root, conversationId = null) {
     const metrics = turn.metrics;
     $('#chat-metrics').textContent = metrics
       ? `模型决策 ${metrics.modelDecisions ?? '未记录'} · HTTP 尝试 ${metrics.httpAttempts ?? '未记录'} · 输入 token ${metrics.usage?.inputTokens ?? '未提供'} · 输出 token ${metrics.usage?.outputTokens ?? '未提供'}${metrics.usageComplete ? '' : ' · 用量记录不完整'}` : '';
-    const available = Object.keys(artifactNames).filter(name => turn.artifacts?.[name]);
+    const available = Object.keys(artifactNames).filter(name => turn.artifacts?.[name]
+      && (canAdministerInstance() || name === 'reply'));
     const signature = turn.turnId + ':' + available.join(',');
     if (signature !== artifactOptions) {
       const previous = $('#chat-artifact').value;
@@ -639,6 +702,19 @@ export function mountChat(root, conversationId = null) {
       conversation = record;
       refreshRequired = false;
       $('#chat-title').textContent = record.title;
+      if (record.requirement) {
+        const key = record.requirement.taskKey;
+        $('#chat-project-tasks').hidden = false;
+        $('#chat-project-tasks').href = '#projects/' + encodeURIComponent(record.workspaceRef)
+          + '/tasks/' + encodeURIComponent(key);
+        $('#chat-project-tasks').textContent = '返回需求与交付';
+        reviewSelect.options[0].textContent = '继续当前需求';
+        $('#chat-review-label').hidden = false;
+      } else if (record.workspaceRef) {
+        if (local.mode === "execute") loadRequirements(record.workspaceRef);
+        $('#chat-project-tasks').hidden = false;
+        $('#chat-project-tasks').href = '#projects/' + encodeURIComponent(record.workspaceRef) + '/tasks';
+      }
       $('#chat-workspace').textContent = record.workspaceRef
         ? `关联项目 ${record.workspaceRef} · 讨论可读取，修改需本轮授权` : '未关联项目';
       $('#chat-connection').textContent = '';
@@ -675,6 +751,7 @@ export function mountChat(root, conversationId = null) {
   };
   executeBox.onchange = () => {
     if (local.pending) return;
+    if (executeBox.checked) loadRequirements(conversation?.workspaceRef);
     local.mode = executeBox.checked ? 'execute' : 'discuss';
     persistDraft();
     updateComposer();
@@ -700,6 +777,18 @@ export function mountChat(root, conversationId = null) {
     updateComposer();
     try {
       const data = await request(`${base}/turns`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+      const application = data.executionRequest;
+      if (payload.mode === 'execute' && application?.kind === 'chat' && application.targetId === conversationId
+          && identifier(application.requestId) && application.snapshot?.clientRequestId === payload.clientRequestId) {
+        acknowledge(payload.clientRequestId);
+        if (!closed) {
+          const note = $('#chat-send-error');
+          const link = element('a', '', '查看执行申请');
+          link.href = projectAccessHref(application.projectId, application.requestId);
+          note.replaceChildren('编码申请已提交。', link);
+        }
+        return;
+      }
       if (!validTurn(data, conversationId) || data.clientRequestId !== payload.clientRequestId || !integer(data.conversationRevision)) throw new Error('提交响应未能核实，请重试原请求。');
       acknowledge(payload.clientRequestId);
       if (!closed) {
@@ -763,6 +852,7 @@ export function mountChat(root, conversationId = null) {
       if (closed) return;
       if (!Array.isArray(data.projects)) throw new Error('项目列表格式异常。');
       for (const project of data.projects) {
+        if (project.canCreateTask === false || project.accessEnabled === false) continue;
         if (project.canCreateTask === false || typeof project.projectId !== 'string' || typeof project.name !== 'string') continue;
         const option = element('option', '', project.name);
         option.value = project.projectId;

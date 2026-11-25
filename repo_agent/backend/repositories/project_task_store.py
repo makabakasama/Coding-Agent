@@ -87,14 +87,18 @@ class ProjectTaskStore(TaskStore):
         except OSError as exc:
             raise TaskError(503, "STORAGE_UNAVAILABLE", "需求或轮次保存失败，保留已有材料") from exc
 
-    def latest(self, *, deleted=False):
-        records = super().latest(deleted=deleted)
+    def latest(self, *, deleted=False, project_ids=None):
+        records = super().latest(deleted=deleted, project_ids=project_ids)
         deleted_ids = self.deleted_ids()
-        for parent, _ in self._requirements():
+        for parent, requirement in self._requirements():
+            if project_ids is not None and requirement['projectId'] not in project_ids:
+                continue
             for path in parent.glob("run_*/task.json"):
                 value = read_json(path)
                 if not self.purge_path(value['taskId']).exists() and (value['taskId'] in deleted_ids) == deleted:
-                    records.append(self.get(value["taskId"]))
+                    record = self.get(value["taskId"])
+                    if project_ids is None or record['contract']['projectId'] in project_ids:
+                        records.append(record)
         records.sort(key=lambda r: (r["createdAt"], r["taskId"]), reverse=True)
         return records[:50]
 

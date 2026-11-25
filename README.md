@@ -41,7 +41,7 @@ if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
 
 - `DATABASE_URL`：已创建数据库的连接地址，API 和 Worker 必需。连接用户需具备建表与读写权限。
 - `LLM_PROVIDER=openai_compatible`、`LLM_PROFILE=gpt` 或 `qwen`，以及对应分组的 `MODEL`、`BASE_URL`、`API_KEY`。实际模型以配置为准，profile 只是分组标签；选中分组缺项不会借用另一分组。
-- `REDIS_URL`：可选读取缓存；不使用时留空。Redis 不是任务队列，调度事实保存在 PostgreSQL。
+- `REDIS_URL`：单用户模式下为可选读取缓存。账号模式需要 Redis 保存会话和登录限流计数。任务调度事实保存在 PostgreSQL。
 
 分别在两个终端启动：
 
@@ -72,6 +72,35 @@ python -m repo_agent.cli.task_cli --port 4176 list
 简化路径入口会自动登记本机目标，不要求预先手写项目配置。已有项目配置继续兼容。原 `repo_agent.task_http`、`repo_agent.task_cli` 和 `repo_agent.import_task_history` 命令保留为薄入口；直接执行 CLI `python -m repo_agent` 继续兼容，不经过网页队列。
 
 开发时可给 API 和 Worker 加 `--reload`。它不会立即中断在途任务，适用于本机开发；详细行为见 [Worker 文档](docs/worker-pool.md)。
+
+### 本地账号模式
+
+安装更新后的依赖，并配置 `DATABASE_URL` 与 `REDIS_URL`。从可信本地终端创建首个管理员及普通账号，密码通过交互提示输入。
+
+```powershell
+python -m repo_agent.cli.account_admin create operator --admin
+python -m repo_agent.cli.account_admin create member
+python -m repo_agent.backend.app --port 4176 --auth
+```
+
+账号工作台的独立 Worker 用 `python -m repo_agent.backend.worker --auth` 启动，并与 API 使用相同的工作台目录参数。Worker 领取时复核审批、账号和冻结范围。任务和执行申请详情可查看审计。[领取与审计实施记录](docs/v0.7/worker-authorization-audit-implementation-20261124.md)
+
+账号模式通过 `--auth` 显式开启。同一工作台数据的 API 实例都应使用该选项。服务仅监听本机回环地址，账号模式适用于可信本机环境。实例管理员在「项目 → 成员与执行审批」启用已登记仓库，指定首位维护者。观察者读取项目记录，开发者提交讨论和编码申请，维护者还可管理成员和审查交付。编码申请由实例管理员放行后入队。
+
+浏览器和 CLI 使用各自的会话。CLI 将会话凭据保存在操作系统凭据库，Windows 使用系统凭据管理器。会话最长八小时。连续五次失败后，该登录名在当前五分钟计数窗口内被限流。
+
+```powershell
+python -m repo_agent.cli.task_cli --port 4176 login operator
+python -m repo_agent.cli.task_cli --port 4176 whoami
+python -m repo_agent.cli.task_cli --port 4176 list
+python -m repo_agent.cli.task_cli --port 4176 logout
+python -m repo_agent.cli.account_admin disable member
+python -m repo_agent.cli.account_admin enable member
+```
+
+退出撤销当前会话。成功退出后，即使 Redis 恢复较旧的会话数据，PostgreSQL 的撤销记录也会阻止旧会话恢复。禁用撤销该账号所有旧会话，启用后需要重新登录。会话 Redis 暂时不可用时，受影响的请求返回 `503`，客户端可保留当前凭据并重试。
+
+任务 CLI 的 `enable-project <项目> <首位维护者>`、`members <项目>` 和 `set-member <项目> <登录名> <角色>` 与网页共用授权。在账号模式下，`start <任务编号>` 提交执行申请，可用 `requests <项目>`、`request-status <项目> <申请编号>` 查看。实例管理员使用 `approve` 或 `reject` 决定。见[项目权限与审批验收](docs/v0.7/project-access-acceptance-20261124.md)。
 
 ## 检查与结果如何理解
 

@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import Mock, patch
 import urllib.error
 import urllib.request
+from uuid import uuid4
 
 from repo_agent.backend.app import create_server
 from repo_agent.backend.schemas.chat_contract import validate_turn
@@ -95,6 +96,21 @@ class ChatProviderAcceptance(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('CODING_AGENT_TEST_DATABASE_URL'), 'Dedicated test database not configured')
 class ChatDatabaseAcceptance(unittest.TestCase):
     def setUp(self):
+        import psycopg
+        from psycopg import sql
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+        database = os.environ['CODING_AGENT_TEST_DATABASE_URL']
+        schema = 'chat_acceptance_' + uuid4().hex
+
+        def schema_command(statement):
+            with psycopg.connect(database, connect_timeout=5) as conn:
+                conn.execute(sql.SQL(statement).format(sql.Identifier(schema)))
+
+        schema_command('CREATE SCHEMA {}')
+        self.addCleanup(schema_command, 'DROP SCHEMA {} CASCADE')
+        options = conninfo_to_dict(database).get('options', '')
+        self.database_url = make_conninfo(database, options=f'{options} -csearch_path={schema}'.strip())
         output = os.environ.get('CHAT_ACCEPTANCE_CASES_ROOT')
         if output:
             self.root = Path(output) / hashlib.sha256(self._testMethodName.encode()).hexdigest()[:8]
@@ -104,7 +120,7 @@ class ChatDatabaseAcceptance(unittest.TestCase):
             temporary = tempfile.TemporaryDirectory()
             self.addCleanup(temporary.cleanup)
             self.root = Path(temporary.name)
-        self.service = build_fixture(self.root)
+        self.service = build_fixture(self.root, database_url=self.database_url)
         self.addCleanup(self.service.close)
         self.chat = self.service.chat
         self.repository = self.chat.store
@@ -133,6 +149,7 @@ class ChatDatabaseAcceptance(unittest.TestCase):
         log = (self.root / (label + '.log')).open('w', encoding='utf-8')
         process = subprocess.Popen([sys.executable, '-m', 'tests.chat_fixture', 'worker', '--root', str(self.root)],
                                    stdout=log, stderr=subprocess.STDOUT,
+                                   env={**os.environ, 'CODING_AGENT_TEST_DATABASE_URL': self.database_url},
                                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
 
         def stop_worker():
@@ -185,9 +202,12 @@ class ChatDatabaseAcceptance(unittest.TestCase):
         self.assertEqual(second['turnId'], self.chat.get(self.cid)['activeTurnId'])
         self.execute()
         actual = FixtureChatModel.calls[-1]
-        self.assertEqual(['user', 'assistant', 'user'],
-                         [message['role'] for message in actual if message['role'] in ('user', 'assistant')])
-        self.assertIn('记住数字 17', [message['content'] for message in actual])
+        self.assertEqual(['system', 'user', 'assistant', 'user', 'user'],
+                         [message['role'] for message in actual])
+        self.assertEqual('记住数字 17', actual[1]['content'])
+        self.assertIn('脚本回复：记住数字 17', actual[2]['content'])
+        self.assertEqual([], json.loads(actual[3]['content'])['program_current_turn']['allowedTools'])
+        self.assertEqual('请引用上一轮', actual[4]['content'])
         self.assertEqual('completed', self.chat.turn(self.cid, second['turnId'])['status'])
 
     def test_project_turn_uses_existing_read_tool_without_writes(self):
@@ -231,13 +251,15 @@ class ChatDatabaseAcceptance(unittest.TestCase):
         self.execute()
         self.assertEqual('completed', self.chat.turn(self.cid, follow['turnId'])['status'])
         records = [json.loads(message['content'])['program_observations'] for message in seen
-                   if 'program_observations' in message['content']]
+                   if message['role'] == 'user' and message['content'].startswith('{"program_observations":')]
         self.assertEqual(1, len(records))
         self.assertEqual(f'chat_obs_{turn["turnId"]}_1', records[0][0]['observationId'])
         self.assertEqual('read_file', records[0][0]['action'])
         self.assertIn('return 17', records[0][0]['result']['data']['content'])
         self.assertEqual(hashlib.sha256(before).hexdigest(), records[0][0]['sha256'])
-        self.assertIn('"read_file"', seen[0]['content'])
+        current_policy = json.loads(seen[-2]['content'])['program_current_turn']
+        self.assertCountEqual(['list_files', 'search_code', 'read_file'], current_policy['allowedTools'])
+        self.assertFalse(current_policy['allowWrites'])
 
     def test_chat_execute_reuses_coding_task_and_returns_actual_result(self):
         project = self.root / 'edit-project'
@@ -308,7 +330,16 @@ class ChatDatabaseAcceptance(unittest.TestCase):
         (project / 'entry.py').write_text('value = 1\n', encoding='utf-8')
         project_id = self.service.projects.register_local(project.resolve(), 'directory')
         self.cid = self.chat.create({'workspaceRef': project_id})['conversationId']
-        first = self.submit('背景：' + 'x' * 4500)
+
+        class ProjectDiscussionModel:
+            def respond(self, messages, *, tools, response_limits):
+                assert {tool['function']['name'] for tool in tools} == {'list_files', 'search_code', 'read_file'}
+                reply = '已记录需求背景。'
+                return TextReply(reply, {'role': 'assistant', 'content': reply})
+
+        self.execution.model_factory = ProjectDiscussionModel
+        background = '背景：' + 'x' * 4500
+        first = self.submit(background)
         self.execute()
         self.assertEqual('completed', self.chat.turn(self.cid, first['turnId'])['status'])
         request = submission('把 value 改成 2', revision=self.chat.get(self.cid)['revision'],
@@ -320,8 +351,10 @@ class ChatDatabaseAcceptance(unittest.TestCase):
         self.execute()
         contract = self.service.store.get(submitted['turnId'])['contract']
         self.assertEqual('把 value 改成 2', contract['current'])
-        self.assertGreater(len(contract['conversationContext']), 4000)
-        self.assertIn('背景：', contract['conversationContext'])
+        context = json.loads(contract['conversationContext'])
+        self.assertEqual({'role': 'user', 'content': background}, context['messages'][0])
+        self.assertEqual({'role': 'assistant', 'content': '已记录需求背景。'}, context['messages'][1])
+        self.assertNotIn(contract['current'], [message['content'] for message in context['messages']])
 
     def test_idempotency_and_competing_submissions(self):
         payload = submission()
@@ -339,10 +372,10 @@ class ChatDatabaseAcceptance(unittest.TestCase):
 
     def test_restart_and_namespace_isolation(self):
         turn = self.submit()
-        second = build_fixture(self.root)
+        second = build_fixture(self.root, database_url=self.database_url)
         self.addCleanup(second.close)
         self.assertEqual(turn['turnId'], second.chat.get(self.cid)['activeTurnId'])
-        other = build_fixture(self.root / 'other-data')
+        other = build_fixture(self.root / 'other-data', database_url=self.database_url)
         self.addCleanup(other.close)
         with self.assertRaises(TaskError) as error:
             other.chat.get(self.cid)
@@ -468,21 +501,7 @@ class ChatDatabaseAcceptance(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=5) as response:
             self.assertEqual(202, response.status)
             turn = json.load(response)
-        log = (self.root / 'worker.log').open('w', encoding='utf-8')
-        process = subprocess.Popen([sys.executable, '-m', 'tests.chat_fixture', 'worker', '--root', str(self.root)],
-                                   stdout=log, stderr=subprocess.STDOUT,
-                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-
-        def stop_worker():
-            (self.root / 'stop').touch()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-            log.close()
-
-        self.addCleanup(stop_worker)
+        process = self.start_worker('worker')
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             status = self.chat.turn(self.cid, turn['turnId'])['status']

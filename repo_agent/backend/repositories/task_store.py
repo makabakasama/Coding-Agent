@@ -119,7 +119,7 @@ class TaskStore:
         except (ValueError, UnicodeError, RecursionError) as exc:
             raise TaskError(500, "TASK_RECORD_CORRUPT", "任务记录损坏，无法读取") from exc
 
-    def latest(self, *, deleted=False) -> list[dict]:
+    def latest(self, *, deleted=False, project_ids=None) -> list[dict]:
         try:
             if not self.root.exists():
                 return []
@@ -131,7 +131,9 @@ class TaskStore:
                         and (directory / "task.json").exists()
                         and not self.purge_path(task_id).exists()
                         and (task_id in deleted_ids) == deleted):
-                    records.append(self.get(task_id))
+                    record = self.get(task_id)
+                    if project_ids is None or record['contract']['projectId'] in project_ids:
+                        records.append(record)
             records.sort(key=lambda r: (datetime.fromisoformat(r["createdAt"].replace("Z", "+00:00")), r["taskId"]), reverse=True)
             return records[:50]
         except OSError as exc:

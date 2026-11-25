@@ -449,14 +449,27 @@ class ChatExecution:
             }, ensure_ascii=False, sort_keys=True)
             if len(contract['conversationContext']) > 250_000:
                 raise TaskError(400, 'CONTEXT_LIMIT', '必要的会话上下文超过执行材料存储上限')
-            task = self.task_service.create(contract, task_id=task_id)
+            base = turn['policySnapshot'].get('reviewBase')
+            if base:
+                task = self.task_service.create(contract, task_id=task_id,
+                                                requirement=(contract['projectId'], base['taskKey']),
+                                                review_base=base)
+            elif turn['policySnapshot'].get('requirementKey'):
+                task = self.task_service.create(contract, task_id=task_id,
+                    requirement=(contract['projectId'], turn['policySnapshot']['requirementKey']))
+            else:
+                task = self.task_service.create(contract, task_id=task_id)
             created = True
             self.store.linked_task(claim, task['taskId'])
             linked = True
             prepared = self.task_service.prepare(task_id, {})
             if prepared['status'] != 'prepared':
                 raise TaskError(409, 'TASK_PREPARATION_FAILED', '任务工作副本未准备完成')
-            _, started = self.task_service.execution.start(task_id, {})
+            if claim.get('authorization') is not None:
+                _, started = self.task_service.execution.start(task_id, {}, authorization=claim['authorization'],
+                                                               execution_id=claim['authorizedExecutionId'])
+            else:
+                _, started = self.task_service.execution.start(task_id, {})
             if not started.get('executionId'):
                 raise TaskError(503, 'EXECUTION_UNCONFIRMED', '任务入队结果缺少执行编号')
             enqueued = True
@@ -464,7 +477,7 @@ class ChatExecution:
         except Exception as exc:
             # A committed task dispatch must never be described as a failed
             # Chat turn. Recovery will inspect the same preallocated task id.
-            if enqueued or created and not linked or isinstance(exc, TaskError) and exc.code == 'STORAGE_UNAVAILABLE':
+            if enqueued or created and not linked or isinstance(exc, TaskError) and exc.status == 503:
                 raise
             try:
                 state = self.task_service.execution.get(task_id, check_readiness=False, fresh=True)
@@ -496,6 +509,9 @@ class ChatExecution:
                 self.store.execution_unknown(claim, 'TASK_EXECUTION_UNKNOWN')
                 continue
             if state['status'] == 'terminated' and not state.get('resultAvailable'):
+                if state.get('authorizationDenied'):
+                    self.store.finish(claim, {'status': 'failed', 'stopReason': state['stopReason']})
+                    continue
                 self.store.execution_unknown(claim, 'TASK_RESULT_UNAVAILABLE')
                 continue
             if state['status'] != 'terminated':
@@ -534,7 +550,16 @@ class ChatExecution:
         """The caller holds both Worker locks, excluding the previous local process."""
         for claim in self.store.interrupted():
             if self.store.claimed_turn(claim)['mode'] == 'execute':
-                self._bridge_claimed(claim)
+                audit = getattr(self.store, 'audit', None)
+                if audit is not None and audit.account_mode():
+                    bound = audit.bridge_dispatch(claim)
+                    if bound:
+                        self.store.bridge_started(claim, claim['turnId'], bound)
+                    else:
+                        self.store.finish(claim, {'status': 'failed', 'stopReason': 'WORKER_INTERRUPTED'},
+                                          recovered=True)
+                else:
+                    self._bridge_claimed(claim)
                 continue
             result = {'status': 'failed', 'stopReason': 'WORKER_INTERRUPTED', 'artifacts': {}}
             try:

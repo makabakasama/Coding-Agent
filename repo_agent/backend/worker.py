@@ -16,6 +16,7 @@ def main():
                         datefmt='%Y-%m-%d %H:%M:%S')
     parser = argparse.ArgumentParser(description=__doc__)
     add_storage_arguments(parser)
+    parser.add_argument('--auth', action='store_true', help='Require account authorization for this workbench')
     parser.add_argument('--workers', type=int, default=3)
     parser.add_argument('--chat-max-input-bytes', type=int, default=2_000_000,
                         help='Transport safety cap in bytes, separate from the model token budget')
@@ -47,6 +48,12 @@ def main():
     service = None
     try:
         service = build_service(args)
+        if args.auth:
+            from repo_agent.backend.repositories.account_store import AccountStore
+            from repo_agent.backend.repositories.project_access_store import ProjectAccessStore
+            AccountStore(service.store._connection)
+            ProjectAccessStore(service.store)
+            service.audit.enable()
         service.chat_execution.configure(max_input_bytes=args.chat_max_input_bytes,
                                          max_output_tokens=args.chat_max_output_tokens,
                                          context_tokens=args.chat_context_tokens,

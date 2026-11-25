@@ -12,7 +12,7 @@ class TaskLifecycle:
         self.store.get(task_id)
         return {'taskId': task_id, 'deleted': self.store.is_deleted(task_id)}
 
-    def change(self, task_id, value):
+    def change(self, task_id, value, *, actor=None):
         if type(value) is not dict or set(value) != {'deleted'} or type(value['deleted']) is not bool:
             raise TaskError(400, 'VALIDATION_ERROR', '请求须指定布尔值 deleted')
         self.store.purge_path(task_id)
@@ -20,9 +20,9 @@ class TaskLifecycle:
         with exclusive(self.store.root / ('lifecycle-' + task_id + '.lock')) as acquired:
             if not acquired:
                 raise TaskError(409, 'TASK_BUSY', '本轮删除或恢复操作正在进行')
-            return self._change(task_id, value)
+            return self._change(task_id, value, actor=actor)
 
-    def _change(self, task_id, value):
+    def _change(self, task_id, value, *, actor=None):
         self.store.get(task_id)
         lock = self.execution._path(self.store.directory(task_id) / 'preparation.lock')
         with ExitStack() as locks:
@@ -37,5 +37,9 @@ class TaskLifecycle:
                 status = self.execution.get(task_id, check_readiness=False)['status']
                 if value['deleted'] and status in ('running', 'finalizing', 'unknown'):
                     raise TaskError(409, 'TASK_BUSY', '任务仍在执行或待核实，暂不能删除')
-                self.store.set_deleted(task_id, value['deleted'])
+                if actor is not None:
+                    self.store.set_deleted(task_id, value['deleted'], audit=self.execution.queue.audit,
+                                           actor=actor.account_id)
+                else:
+                    self.store.set_deleted(task_id, value['deleted'])
         return {'taskId': task_id, 'deleted': value['deleted']}

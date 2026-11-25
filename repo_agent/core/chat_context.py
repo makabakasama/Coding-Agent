@@ -77,6 +77,7 @@ def build_chat_context(turn, history, *, tool_definitions=None, omitted_turn_cou
             # Dynamic fields belong at the tail, so old messages remain a reusable prefix.
             messages.append({'role': 'user', 'content': json.dumps({
                 'program_current_turn': current_permissions,
+                **({'requirementBrief': policy['requirement']} if policy.get('requirement') else {}),
                 'omittedTurnCount': omitted_turn_count,
             }, ensure_ascii=False)})
             origins.append({'kind': 'current_turn', 'turnId': turn['turnId']})

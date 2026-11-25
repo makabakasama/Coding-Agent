@@ -1,5 +1,7 @@
 psycopg[binary]>=3.2,<4
 psycopg_pool>=3.2,<4
 redis>=5,<8
+argon2-cffi>=23.1,<26
+keyring>=25,<26
 tiktoken>=0.7,<1
 tokenizers>=0.20,<1

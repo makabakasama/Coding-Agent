@@ -1,4 +1,5 @@
 """Execution API that only enqueues work. Execution evidence stays in TaskExecution."""
+import hashlib
 import subprocess
 from repo_agent.backend.schemas.task_contract import TaskError
 from repo_agent.backend.services.task_execution import git
@@ -41,9 +42,10 @@ class QueuedExecution:
         with self.execution._io():
             state = self.execution._read_state(task_id)
         status = queued['status']
+        denied = status == 'terminated' and (queued.get('reason') or '').startswith('AUTH_')
         if status == 'running' and state and state.get('executionId') == queued['executionId']:
             status = state['status']
-        if status == 'terminated' and (not state or state['status'] != 'terminated'):
+        if status == 'terminated' and not denied and (not state or state['status'] != 'terminated'):
             status = 'unknown'
         return {**(state or {}), 'schemaVersion': 1, 'taskId': task_id,
                 'executionId': queued['executionId'], 'status': status, 'canStart': False,
@@ -54,24 +56,33 @@ class QueuedExecution:
                 'startedAt': queued['startedAt'], 'finishedAt': queued['finishedAt'],
                 'liveness': 'confirmed' if status in ('running', 'finalizing') else 'stopped' if status == 'terminated' else 'unconfirmed',
                 'stopReason': queued['reason'] or (state or {}).get('stopReason'),
-                'resultAvailable': bool((state or {}).get('resultAvailable'))}
+                'resultAvailable': bool((state or {}).get('resultAvailable')),
+                **({'authorizationDenied': True} if denied else {})}
 
-    def start(self, task_id, value):
+    def start(self, task_id, value, *, authorization=None, execution_id=None):
         if type(value) is not dict or value:
             raise TaskError(400, 'VALIDATION_ERROR', '启动请求须为空 JSON 对象')
         self.execution.store.assert_active(task_id)
         state = self.get(task_id, fresh=True)
         if state['status'] != 'not_started':
+            if authorization is not None and state.get('executionId') != execution_id:
+                raise TaskError(409, 'AUTH_SCOPE_MISMATCH', '编码任务已有其他执行编号')
             return 200, state
+        task = self.execution.store.get(task_id)
+        repository_key, mode = self.admission(task, state)
+        if authorization is not None:
+            authorization = self.queue.audit.bind_bridge_task(task, authorization, execution_id)
+        self.queue.enqueue(task_id, repository_key=repository_key, workspace_mode=mode,
+                           authorization=authorization, execution_id=execution_id)
+        return 202, self.get(task_id)
+
+    def admission(self, task, state):
         if not state['canStart']:
             raise TaskError(409, state['startBlockReason'], '任务当前不可入队')
-        import hashlib
-        task = self.execution.store.get(task_id)
-        source = self.execution.projects.repository(task['contract']['projectId'], task['contract']['baseCommit'])
+        contract = task['contract']
+        source = self.execution.projects.repository(contract['projectId'], contract['baseCommit'])
         repository_key = hashlib.sha256(str(source).casefold().encode()).hexdigest()
-        self.queue.enqueue(task_id, repository_key=repository_key,
-                           workspace_mode=task['contract'].get('workspaceMode', 'worktree'))
-        return 202, self.get(task_id)
+        return repository_key, contract.get('workspaceMode', 'worktree')
 
     def recovery(self, task_id, value=None):
         if self.queue.get(task_id) is None:

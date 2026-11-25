@@ -50,10 +50,14 @@ class FixtureTokenBudget:
     def __init__(self, model, *, context_tokens, output_tokens, reserve_tokens, tokenizer):
         self.model = model
         self.input_tokens = context_tokens - output_tokens - reserve_tokens
+        self.output_tokens = output_tokens
         self.counter_name = 'fixture:characters'
 
+    def count(self, messages, tools):
+        return len(json.dumps([messages, tools], ensure_ascii=False))
+
     def require(self, messages, tools):
-        used = len(json.dumps([messages, tools], ensure_ascii=False))
+        used = self.count(messages, tools)
         if used > self.input_tokens:
             raise ContextLimitError('Fixture token budget exceeded')
         return used
@@ -64,13 +68,13 @@ class FixtureTokenBudget:
                 'estimatedInputTokens': used}
 
 
-def build_fixture(root):
+def build_fixture(root, *, database_url=None):
     root.mkdir(parents=True, exist_ok=True)
     config = root / 'projects.json'
     if not config.exists():
         config.write_text(json.dumps({'projects': []}), encoding='utf-8')
     store = DatabaseTaskStore(root / 'data', root / 'runs', root / 'workspaces',
-                              os.environ['CODING_AGENT_TEST_DATABASE_URL'])
+                              database_url or os.environ['CODING_AGENT_TEST_DATABASE_URL'])
     return TaskService(store, TaskProjects(config), project_root=root,
                        model_factory=FixtureCodingModel, chat_model_factory=FixtureChatModel,
                        chat_token_counter_factory=FixtureTokenBudget)
